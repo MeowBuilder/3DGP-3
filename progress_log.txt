@@ -1,0 +1,6 @@
+2025년 11월 19일 수요일:
+- `stdafx.h`에 C++ 표준 라이브러리 난수 생성기 (`<random>`)를 포함하고, 전역 `inline float Random()` 함수를 정의했습니다.
+- `stdafx.h`의 `RANDOM_COLOR` 매크로를 `rand()` 대신 새로 정의된 `Random()` 함수를 사용하도록 수정했습니다.
+- `Scene.cpp`의 `BuildObjects` 함수에서 빌보드 텍스처 인덱스를 생성할 때 `rand()` 대신 `Random()` 함수를 사용하도록 수정했습니다.
+- `Shader.cpp`의 `CObjectsShader` 클래스 내부에 중복 정의되어 있던 `Random()` 함수들을 제거했습니다.
+- `Shaders.hlsl` 파일의 `GSBillboard` 함수에서 빌보드의 `up` 벡터를 월드 `Y`축으로 고정하고, `right` 벡터를 카메라의 시선 방향과 월드 `Y`축에 수직이 되도록 재계산하여 빌보드가 하늘에서 볼 때 눕는 문제를 해결했습니다.
