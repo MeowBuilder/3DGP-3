@@ -1,0 +1,47 @@
+# 지형 테셀레이션 및 LOD (Level of Detail) 구현 계획
+
+## 1. 개요
+현재 정적인 그리드 메쉬로 구성된 지형(`CHeightMapTerrain`)을 DirectX 12의 테셀레이션 단계(Hull Shader, Domain Shader)를 적용하여 카메라와의 거리에 따라 동적으로 메쉬의 정밀도를 조절(LOD)하는 기능을 구현합니다.
+
+## 2. 목표
+1.  **Hull Shader (HS)**: 카메라와 패치(Patch) 사이의 거리를 기반으로 테셀레이션 계수(Tessellation Factor)를 동적으로 계산합니다. 가까운 지형은 고해상도로, 먼 지형은 저해상도로 표현합니다.
+2.  **Domain Shader (DS)**: 테셀레이터가 생성한 정점들에 대해 하이트맵(HeightMap) 텍스처를 샘플링하여 실제 높이(Displacement Mapping)를 적용합니다.
+3.  **성능 최적화**: 불필요한 정점 처리를 줄여 렌더링 효율을 높입니다.
+
+## 3. 상세 구현 단계
+
+### A. HLSL 쉐이더 작성 (Shaders.hlsl 수정 또는 Terrain.hlsl 신규 생성)
+1.  **Vertex Shader (VS)**
+    -   기존 `VSTerrain` 수정.
+    -   입력된 제어점(Control Point)을 그대로 Hull Shader로 넘겨주는 역할 (Pass-through).
+2.  **Hull Shader (HS)**
+    -   `PatchConstantFunc`: 패치의 중심점과 카메라 위치 간의 거리를 계산하여 `EdgeTess`와 `InsideTess` 계수 결정.
+    -   거리가 가까울수록 계수를 높이고(예: 64), 멀수록 낮춤(예: 1).
+    -   Control Point 쉐이더: 제어점 데이터 통과.
+3.  **Domain Shader (DS)**
+    -   패치 좌표(UV)를 기반으로 정점의 월드 위치 계산.
+    -   하이트맵 텍스처(`gtxtTerrainTexture`의 R채널 또는 별도 하이트맵)를 샘플링하여 Y축으로 변위(Displacement) 적용.
+    -   뷰/투영 변환 적용.
+
+### B. C++ 코드 수정
+
+#### 1. Mesh 클래스 수정 (`CHeightMapGridMesh`)
+-   **Primitive Topology 변경**: `D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP` 또는 `TRIANGLELIST`에서 `D3D_PRIMITIVE_TOPOLOGY_4_CONTROL_POINT_PATCHLIST`로 변경해야 합니다.
+-   **Index Buffer**: 4개의 제어점(Quad Patch)을 구성하도록 인덱스 버퍼 생성 로직 수정.
+
+#### 2. Shader 클래스 수정 (`CTerrainShader`)
+-   **쉐이더 컴파일 추가**: `CreateHullShader`, `CreateDomainShader` 메서드 구현 및 호출.
+-   **PSO 수정**: `D3D12_GRAPHICS_PIPELINE_STATE_DESC`에서 `HS`, `DS` 필드 설정 및 `PrimitiveTopologyType`을 `D3D12_PRIMITIVE_TOPOLOGY_TYPE_PATCH`로 설정.
+
+#### 3. Root Signature 확인
+-   하이트맵 텍스처가 Domain Shader에서 접근 가능해야 하므로, `D3D12_SHADER_VISIBILITY_DOMAIN` 또는 `ALL`로 설정되어 있는지 확인합니다. (현재 `ALL`로 설정된 것으로 보임)
+
+## 4. 예상 이슈 및 해결
+-   **크랙(Crack) 현상**: 서로 다른 테셀레이션 레벨을 가진 인접 패치 사이에서 틈이 생길 수 있음. -> 인접한 엣지의 테셀레이션 계수를 일치시키는 알고리즘 적용 필요 (World Space 기준 엣지 중점 거리 계산 등).
+-   **성능**: 과도한 테셀레이션은 성능 저하 원인. -> 적절한 최대/최소 거리 및 계수 튜닝 필요.
+
+## 5. 작업 순서
+1.  `CHeightMapGridMesh`를 Patch List 토폴로지로 변경.
+2.  `Shaders.hlsl`에 HS, DS 코드 작성.
+3.  `CTerrainShader` 및 `CShader` 클래스에 HS, DS 컴파일 및 PSO 생성 로직 추가.
+4.  렌더링 테스트 및 LOD 거리 파라미터 튜닝.

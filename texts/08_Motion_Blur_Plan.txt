@@ -1,0 +1,56 @@
+# 컴퓨트 쉐이더(Compute Shader) 기반 모션 블러 구현 계획
+
+## 1. 개요
+플레이어가 빠르게 이동할 때 화면 가장자리로 갈수록 흐릿해지는 방사형 블러(Radial/Zoom Blur) 효과를 구현하여 속도감을 표현합니다. 이를 위해 DirectX 12의 컴퓨트 쉐이더(Compute Shader, CS)를 활용하여 후처리(Post-Processing) 파이프라인을 구축합니다.
+
+## 2. 목표
+1.  **Off-screen Render Target**: 씬을 바로 백버퍼(Back Buffer)에 그리지 않고, 중간 텍스처(UAV 접근 가능)에 렌더링합니다.
+2.  **Compute Shader**: 중간 텍스처를 입력받아 블러 처리를 수행하고 결과를 백버퍼(또는 결과 텍스처)에 씁니다.
+3.  **속도 연동**: 플레이어의 이동 속도(`GetPlayerSpeed()`)에 비례하여 블러의 강도를 조절합니다.
+
+## 3. 상세 구현 단계
+
+### A. 리소스 준비 (`CScene` 또는 `CGameFramework`)
+1.  **Scene Texture (SRV/UAV)**: 씬 렌더링 결과를 담을 텍스처 생성.
+    -   Format: `DXGI_FORMAT_R8G8B8A8_UNORM`
+    -   Flags: `D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS | D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET`
+2.  **Output Texture (UAV)**: CS 결과(백버퍼로 복사될 텍스처) 생성 (백버퍼를 직접 UAV로 쓸 수 없다면 필요). D3D12에서는 SwapChain Buffer를 UAV로 쓸 수 없으므로 별도 텍스처나 Copy 과정이 필요함.
+
+### B. HLSL 쉐이더 작성 (`MotionBlur.hlsl` 또는 `Shaders.hlsl`)
+1.  **Compute Shader (CS)**
+    -   `RWTexture2D<float4> gOutput`: 출력 텍스처.
+    -   `Texture2D gInput`: 입력 텍스처 (씬 렌더링 결과).
+    -   `cbuffer cbBlurInfo`: 블러 강도(Intensity), 중심점(Center) 정보.
+    -   **알고리즘**: 현재 픽셀 좌표에서 화면 중심 방향으로 텍스처를 여러 번 샘플링(Loop)하여 평균값을 계산합니다. 샘플링 거리는 `BlurStrength`에 비례합니다.
+
+### C. C++ 코드 수정
+
+#### 1. `CMotionBlurShader` 클래스 생성
+-   `CShader` 상속.
+-   `CreateComputeShader` 메서드 구현.
+-   `Dispatch` 메서드 구현: 스레드 그룹 수 계산 및 명령 발행.
+
+#### 2. `CGameFramework::Render` 파이프라인 변경
+-   **기존**: Clear BackBuffer -> Render Scene -> Present.
+-   **변경**:
+    1.  **Pass 1 (Scene Render)**: Render Target을 `Scene Texture`로 설정 및 Clear -> 씬 렌더링.
+    2.  **Resource Barrier**: `Scene Texture`를 `RENDER_TARGET` -> `NON_PIXEL_SHADER_RESOURCE` 상태로 전이. `Output Texture`를 `UNORDERED_ACCESS` 상태로 전이.
+    3.  **Pass 2 (Compute Shader)**:
+        -   `CMotionBlurShader` 바인딩.
+        -   플레이어 속도를 CBV로 업데이트.
+        -   `Dispatch(Width/N, Height/N, 1)`.
+    4.  **Pass 3 (Copy to BackBuffer)**:
+        -   Resource Barrier: `Output Texture` -> `COPY_SOURCE`, BackBuffer -> `COPY_DEST`.
+        -   `CopyResource` 수행.
+        -   Resource Barrier: BackBuffer -> `PRESENT`.
+    5.  **Present**.
+
+## 4. 예상 이슈 및 해결
+-   **리소스 관리**: RTV, SRV, UAV 디스크립터 힙 관리 및 인덱싱이 복잡해질 수 있음. -> `CScene`의 디스크립터 힙 관리 로직을 활용하거나 별도 힙 사용.
+-   **UI 처리**: UI는 블러 처리에서 제외되어야 깔끔함. -> 씬 렌더링(Scene Texture) -> CS 블러 -> 백버퍼 복사 -> **UI 렌더링(백버퍼)** 순서로 변경.
+
+## 5. 작업 순서
+1.  오프스크린 렌더링을 위한 텍스처 리소스 생성 (`CGameFramework`).
+2.  모션 블러 HLSL 작성.
+3.  `CMotionBlurShader` C++ 클래스 구현.
+4.  `FrameAdvance` 루프 내 렌더링 순서 및 리소스 배리어 로직 재구성.

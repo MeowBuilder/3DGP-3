@@ -1,0 +1,62 @@
+# 그림자 매핑 (Shadow Mapping) 구현 계획
+
+## 1. 개요
+광원(주로 Directional Light)의 시점에서 씬의 깊이(Depth) 정보를 텍스처(Shadow Map)에 미리 렌더링한 후, 실제 카메라 시점에서 렌더링할 때 해당 픽셀이 그림자 영역에 있는지 판별하여 명암을 조절하는 기술입니다.
+
+## 2. 목표
+1.  **Shadow Pass**: 광원 시점의 뷰/투영 행렬을 사용하여 씬의 깊이 정보를 텍스처에 저장합니다.
+2.  **Lighting Pass**: 씬 렌더링 시 쉐이더 맵을 샘플링하여 현재 픽셀의 광원 기준 깊이와 쉐이더 맵의 깊이를 비교(Shadow Test)합니다.
+3.  **PCF (Percentage Closer Filtering)**: 그림자 경계의 계단 현상을 완화하기 위해 주변 픽셀을 샘플링하여 부드럽게 처리합니다.
+
+## 3. 상세 구현 단계
+
+### A. 리소스 준비 (`CScene`)
+1.  **Shadow Map Texture**: 깊이 버퍼용 텍스처 (`DXGI_FORMAT_D24_UNORM_S8_UINT` 또는 `D32_FLOAT`).
+    -   Flags: `D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL`.
+    -   SRV(Shader Resource View) 생성을 위해 `Format`은 Typeless로, DSV는 Depth로, SRV는 Float 등으로 설정 필요할 수 있음.
+2.  **DSV Descriptor Heap**: 쉐이더 맵 전용 깊이 스텐실 뷰 힙.
+3.  **SRV Descriptor Heap**: 쉐이더에서 읽기 위한 SRV 힙 (기존 힙에 추가).
+
+### B. HLSL 쉐이더 작성 (`Shaders.hlsl`)
+1.  **VS_Shadow**: 깊이 렌더링 전용 버텍스 쉐이더.
+    -   입력: Position.
+    -   출력: `mul(mul(pos, gmtxLightView), gmtxLightProjection)` (H clip space position).
+    -   Pixel Shader는 `NULL` 또는 단순 깊이 출력용 더미 쉐이더 사용.
+2.  **Shadow Calculation Function**:
+    -   월드 위치를 광원 투영 공간(NDC) -> 텍스처 좌표(0~1)로 변환.
+    -   `gtxtShadowMap.SampleCmpLevelZero` 등을 사용하여 깊이 비교.
+3.  **Standard Shader 수정**:
+    -   `PSStandard`에서 조명 계산 시 Shadow Factor(0.0~1.0)를 곱하여 차폐 적용.
+
+### C. C++ 코드 수정
+
+#### 1. `CScene` 수정
+-   `BuildShadowMap()`: 텍스처 리소스 생성.
+-   `UpdateShaderVariables()`: 광원의 뷰/투영 행렬(`gmtxLightView`, `gmtxLightProjection`)을 상수 버퍼에 업데이트.
+-   `Render()` 함수 흐름 변경:
+    1.  **Shadow Pass**:
+        -   Render Target: NULL (Color 안 씀), Depth Stencil: Shadow Map DSV.
+        -   Viewport: 쉐이더 맵 해상도에 맞게 설정 (예: 2048x2048).
+        -   Root Signature: 쉐이더 맵 전용 또는 기존 것 활용.
+        -   모든 그림자 캐스팅 오브젝트(`CGameObject`)를 광원 행렬로 렌더링.
+    2.  **Resource Barrier**: Shadow Map Texture `DEPTH_WRITE` -> `PIXEL_SHADER_RESOURCE`.
+    3.  **Main Pass**:
+        -   Render Target: Back Buffer / Scene Texture.
+        -   Viewport: 화면 해상도.
+        -   Shadow Map SRV를 루트 파라미터에 바인딩.
+        -   일반 렌더링 수행.
+
+#### 2. `CShader` / `CShadowMapShader`
+-   그림자 패스용 쉐이더/PSO 생성.
+-   Rasterizer State: `DepthBias`, `SlopeScaledDepthBias` 설정 (Shadow Acne 방지).
+
+## 4. 예상 이슈 및 해결
+-   **Shadow Acne**: 깊이 비교 정밀도 문제로 표면에 줄무늬 발생. -> Bias 설정 및 PCF 적용.
+-   **Peter Panning**: Bias가 너무 커서 그림자가 오브젝트에서 붕 떠 보이는 현상. -> 적절한 Bias 값 튜닝.
+-   **Projection 범위**: Directional Light의 Orthographic 투영 범위를 씬 전체를 커버하면서도 해상도를 낭비하지 않도록 플레이어 중심으로 설정 필요.
+
+## 5. 작업 순서
+1.  Shadow Map 리소스(DSV, SRV) 생성.
+2.  Shadow Pass용 쉐이더 및 PSO 작성.
+3.  `CScene::Render`에서 2-Pass 렌더링 구조 잡기.
+4.  메인 쉐이더에서 Shadow Map 샘플링 및 조명 적용.

@@ -17,6 +17,10 @@ CBillboardObject::CBillboardObject(ID3D12Device* pd3dDevice, ID3D12GraphicsComma
     SetMaterial(0, pMaterial);
 
     SetPosition(xmf3Position);
+    
+    // Billboard size in GS is 4.0f (half-extent).
+    // Use 6.0f to cover the corners when rotated to face camera.
+    SetLocalAABB(XMFLOAT3(-6.0f, -6.0f, -6.0f), XMFLOAT3(6.0f, 6.0f, 6.0f));
 
     UpdateTransform(NULL);
 }

@@ -54,6 +54,7 @@ public:
 	virtual void OnPrepareRender(ID3D12GraphicsCommandList *pd3dCommandList, int nPipelineState=0);
 	virtual void Render(ID3D12GraphicsCommandList *pd3dCommandList, CCamera *pCamera, int nPipelineState=0);
 	virtual void Render(ID3D12GraphicsCommandList* pd3dCommandList, CCamera* pCamera, int nPipelineState, bool bRenderAABB);
+	virtual void RenderCulling(ID3D12GraphicsCommandList *pd3dCommandList, CCamera *pCamera);
 
 	virtual void ReleaseUploadBuffers() { }
 
@@ -127,6 +128,7 @@ public:
 
 	virtual void Render(ID3D12GraphicsCommandList* pd3dCommandList, CCamera* pCamera, int nPipelineState);
 	virtual void Render(ID3D12GraphicsCommandList *pd3dCommandList, CCamera *pCamera, int nPipelineState=0, bool bRenderAABB = false);
+	virtual void RenderCulling(ID3D12GraphicsCommandList *pd3dCommandList, CCamera *pCamera);
 	void RenderReflected(ID3D12GraphicsCommandList* pd3dCommandList, CCamera* pCamera, const XMMATRIX& xmmtxReflection, FXMVECTOR xmMirrorPlane)
 	{
 		CShader::Render(pd3dCommandList, pCamera, 1);

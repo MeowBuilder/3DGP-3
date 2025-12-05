@@ -1,0 +1,62 @@
+# 렌더링 파이프라인 및 실행 흐름 (Rendering Pipeline Flow)
+
+## 1. 메인 루프 (Main Loop)
+`LabProject08-1-3.cpp`의 `WinMain`에서 시작하여 메시지 루프를 돌며 `CGameFramework::FrameAdvance()`를 지속적으로 호출합니다.
+
+### FrameAdvance() 실행 순서
+1. **Timer Update**: `m_GameTimer.Tick()`을 호출하여 델타 타임 계산.
+2. **ProcessInput()**: 키보드/마우스 입력을 처리하여 플레이어 이동이나 게임 상태 변경.
+3. **AnimateObjects()**:
+    - `m_pScene->AnimateObjects()` 호출.
+    - 씬 내의 모든 `CGameObject`들의 `Animate()` 메서드 실행 (물리 이동, 회전, 애니메이션 갱신).
+4. **Render()**: 실제 그리기 명령 수행.
+
+## 2. 렌더링 상세 흐름 (Render Flow)
+
+### A. 프레임 시작 (Begin Frame)
+- `CGameFramework::Render()`에서 시작.
+- 커맨드 할당자(Command Allocator)와 커맨드 리스트(Command List)를 초기화(Reset).
+- 뷰포트(Viewport)와 시저 사각형(Scissor Rect) 설정.
+- 백버퍼(Back Buffer)를 렌더 타겟으로 설정하고 클리어(ClearRenderTargetView).
+- 깊이/스텐실 버퍼(Depth/Stencil Buffer) 클리어.
+
+### B. 씬 렌더링 (Scene Rendering)
+`CGameFramework`는 `m_pCommandList`를 `CScene::Render()`에 전달합니다.
+
+1. **카메라 갱신**: `CCamera::UpdateShaderVariables()`를 호출하여 뷰/투영 행렬을 상수 버퍼(Constant Buffer)에 업데이트.
+2. **조명 갱신**: 씬의 조명 정보를 상수 버퍼에 업데이트.
+3. **오브젝트 순회**:
+    - 씬은 자신이 관리하는 `CShader` 리스트나 `CGameObject` 리스트를 순회합니다.
+    - 일반적으로 쉐이더(PSO) 변경 비용을 줄이기 위해, 같은 쉐이더를 사용하는 오브젝트끼리 묶어서 그립니다.
+
+### C. 쉐이더 및 오브젝트 렌더링
+`CGameObject::Render(ID3D12GraphicsCommandList* pd3dCommandList)` 호출 시:
+
+1. **PSO 설정**: `CShader::OnPrepareRender()`가 호출되어 해당 쉐이더에 맞는 파이프라인 상태 객체(PSO)를 커맨드 리스트에 설정.
+2. **루트 시그니처**: `CScene`에서 생성한 전역 루트 시그니처가 이미 설정되어 있음.
+3. **루트 파라미터 설정**:
+    - 월드 행렬(World Matrix) 등을 루트 상수(Root Constants)나 CBV로 설정.
+    - 텍스처 디스크립터 핸들을 설정.
+4. **메쉬 그리기**: `CMesh::Render()` 호출.
+    - 정점 버퍼 뷰(VBV)와 인덱스 버퍼 뷰(IBV)를 IA(Input Assembler)에 바인딩.
+    - `DrawIndexedInstanced` 등의 드로우 콜(Draw Call) 발생.
+
+### D. 프레임 종료 (End Frame)
+- 리소스 배리어(Resource Barrier)를 통해 백버퍼를 `PRESENT` 상태로 전이.
+- 커맨드 리스트 실행(`ExecuteCommandLists`).
+- 스왑 체인 프레젠트(`Present`): 화면 갱신.
+- 펜스(Fence)를 사용하여 GPU 실행 완료 대기(동기화).
+
+## 3. D3D12 핵심 요소 구현
+
+### Root Signature
+- **관리**: `CScene` 클래스가 전역적으로 관리(`CreateGraphicsRootSignature`).
+- **구조**: 레지스터 b0(월드, 뷰, 투영 행렬 등), t0(텍스처) 등을 슬롯에 매핑하여 모든 쉐이더가 공통된 규약을 따르도록 설계됨.
+
+### Pipeline State Object (PSO)
+- **관리**: 각 `CShader` 파생 클래스가 자신에게 필요한 PSO를 생성하고 보유.
+- **특징**: 쉐이더(VS, PS), 블렌드 상태, 래스터라이저 상태, 깊이/스텐실 상태 등을 미리 구워놓은 불변 객체.
+
+### Descriptor Heap
+- **관리**: `CScene` 또는 `CGameFramework`에서 SRV(Shader Resource View) 및 CBV(Constant Buffer View)를 위한 힙을 생성.
+- **사용**: 텍스처 로딩 시 힙의 핸들을 할당받아 텍스처와 연결.

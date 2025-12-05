@@ -74,8 +74,7 @@ void CCamera::SetScissorRect(LONG xLeft, LONG yTop, LONG xRight, LONG yBottom)
 void CCamera::GenerateProjectionMatrix(float fNearPlaneDistance, float fFarPlaneDistance, float fAspectRatio, float fFOVAngle)
 {
 	m_xmf4x4Projection = Matrix4x4::PerspectiveFovLH(XMConvertToRadians(fFOVAngle), fAspectRatio, fNearPlaneDistance, fFarPlaneDistance);
-//	XMMATRIX xmmtxProjection = XMMatrixPerspectiveFovLH(XMConvertToRadians(fFOVAngle), fAspectRatio, fNearPlaneDistance, fFarPlaneDistance);
-//	XMStoreFloat4x4(&m_xmf4x4Projection, xmmtxProjection);
+	GenerateFrustum();
 }
 
 void CCamera::GenerateViewMatrix(XMFLOAT3 xmf3Position, XMFLOAT3 xmf3LookAt, XMFLOAT3 xmf3Up)
@@ -90,6 +89,7 @@ void CCamera::GenerateViewMatrix(XMFLOAT3 xmf3Position, XMFLOAT3 xmf3LookAt, XMF
 void CCamera::GenerateViewMatrix()
 {
 	m_xmf4x4View = Matrix4x4::LookAtLH(m_xmf3Position, m_xmf3LookAtWorld, m_xmf3Up);
+	GenerateFrustum();
 }
 
 void CCamera::RegenerateViewMatrix()
@@ -104,6 +104,22 @@ void CCamera::RegenerateViewMatrix()
 	m_xmf4x4View._41 = -Vector3::DotProduct(m_xmf3Position, m_xmf3Right);
 	m_xmf4x4View._42 = -Vector3::DotProduct(m_xmf3Position, m_xmf3Up);
 	m_xmf4x4View._43 = -Vector3::DotProduct(m_xmf3Position, m_xmf3Look);
+
+	GenerateFrustum();
+}
+
+void CCamera::GenerateFrustum()
+{
+	BoundingFrustum::CreateFromMatrix(m_d3dFrustumView, XMLoadFloat4x4(&m_xmf4x4Projection));
+	
+	XMMATRIX xmmtxView = XMLoadFloat4x4(&m_xmf4x4View);
+	XMMATRIX xmmtxInverseView = XMMatrixInverse(NULL, xmmtxView);
+	m_d3dFrustumView.Transform(m_d3dFrustumWorld, xmmtxInverseView);
+}
+
+bool CCamera::IsInFrustum(const DirectX::BoundingBox& boundingBox)
+{
+	return m_d3dFrustumWorld.Intersects(boundingBox);
 }
 
 void CCamera::CreateShaderVariables(ID3D12Device *pd3dDevice, ID3D12GraphicsCommandList *pd3dCommandList)

@@ -1,0 +1,82 @@
+# 절두체 컬링 및 바운딩 박스 개선 계획 (Frustum Culling Plan)
+
+## 1. 현황 분석 (Current Status)
+
+### CGameObject
+- `DirectX::BoundingBox m_WorldAABB`를 이미 멤버 변수로 보유하고 있습니다.
+- `XMFLOAT3 m_xmf3LocalAABBMin`, `Max`로 로컬 AABB 정보를 저장하고 있습니다.
+- `SetLocalAABB`로 로컬 정보 설정은 가능하나, 매 프레임 월드 변환(Transform)에 따른 `m_WorldAABB` 갱신 로직이 `UpdateTransform` 내부에 확실하게 구현되어 있는지 확인이 필요합니다.
+
+### CCamera
+- View, Projection 행렬은 관리되고 있으나, 컬링을 위한 절두체(`BoundingFrustum`) 객체나 검사 로직이 부재합니다.
+
+### CMesh
+- 메쉬 로드 시 `m_xmf3AABBCenter`, `Extents`를 계산하여 저장하고 있습니다. 이는 `CGameObject`의 초기 로컬 AABB 설정에 사용됩니다.
+
+## 2. 구현 목표 (Goals)
+1. **정확한 바운딩 박스 갱신**: 오브젝트가 이동/회전/크기변환 할 때마다 월드 공간의 AABB(`m_WorldAABB`)가 올바르게 갱신되도록 합니다.
+2. **절두체 클래스 통합**: `CCamera` 클래스에 `DirectX::BoundingFrustum`을 도입하여 효율적인 컬링 검사를 지원합니다.
+3. **렌더링 최적화**: 렌더링 루프에서 컬링 검사를 수행하여 시야 밖의 오브젝트 렌더링을 건너뜁니다.
+
+## 3. 상세 구현 계획 (Implementation Details)
+
+### A. Camera.h/cpp 수정
+1. **멤버 변수 추가**:
+   - `DirectX::BoundingFrustum m_d3dFrustumView`: 뷰 공간 기준 절두체 (Projection Matrix로 생성).
+   - `DirectX::BoundingFrustum m_d3dFrustumWorld`: 월드 공간 기준 절두체 (View Matrix의 역행렬로 변환).
+2. **메서드 추가/수정**:
+   - `UpdateFrustum()`: 투영 행렬 변경 시 `m_d3dFrustumView` 생성. 뷰 행렬 변경 시 이를 월드 공간으로 변환하여 `m_d3dFrustumWorld` 갱신.
+   - `IsInFrustum(const DirectX::BoundingBox& boundingBox)`: AABB가 절두체 안에 있는지 검사하는 헬퍼 함수.
+
+### B. GameObject.h/cpp 수정
+1. **초기화 로직 보완**:
+   - 메쉬 설정(`SetMesh`) 시 메쉬의 AABB 정보를 가져와 `CGameObject`의 로컬 AABB(`m_xmf3LocalAABBMin/Max`)를 설정합니다.
+   - `m_LocalAABB` (`BoundingBox`) 멤버를 추가하여 로컬 상태의 바운딩 박스를 명시적으로 관리할 것을 권장합니다.
+2. **갱신 로직 강화 (`UpdateTransform` 등)**:
+   - 월드 행렬이 갱신된 직후, 로컬 AABB(`m_LocalAABB`)를 월드 행렬로 변환(`Transform`)하여 `m_WorldAABB`에 저장합니다.
+   - `BoundingBox::Transform` 메서드를 활용합니다.
+
+### C. 렌더링 루프 수정 (Scene.cpp 또는 GameFramework.cpp)
+1. **컬링 검사**:
+   - `CScene::Render` 또는 `CGameObject::Render` 호출 직전에 `pCamera->IsInFrustum(pGameObject->m_WorldAABB)`를 호출합니다.
+   - `false` 반환 시 렌더링 및 하위 자식 순회를 중단(또는 자식은 별도 검사)합니다.
+
+## 4. 예상 코드 변경 (Expected Changes)
+
+### Camera.h
+```cpp
+// 추가
+#include <DirectXCollision.h> 
+
+class CCamera {
+    // ...
+    DirectX::BoundingFrustum m_FrustumView;
+    DirectX::BoundingFrustum m_FrustumWorld;
+    
+public:
+    void UpdateFrustum(); // View/Proj 행렬 업데이트 시 호출
+    bool IsInFrustum(const DirectX::BoundingBox& box);
+    // ...
+};
+```
+
+### Object.h / Object.cpp
+```cpp
+class CGameObject {
+    // ...
+    DirectX::BoundingBox m_LocalAABB; // 로컬 AABB 명시적 관리
+    // ...
+    void UpdateBoundingBox(); // UpdateTransform 등에서 호출
+};
+```
+
+### Scene.cpp
+```cpp
+void CScene::Render(...) {
+    // ...
+    if (pCamera->IsInFrustum(pObject->GetWorldAABB())) {
+        pObject->Render(...);
+    }
+    // ...
+}
+```

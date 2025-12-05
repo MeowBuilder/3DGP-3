@@ -1050,11 +1050,17 @@ void CScene::Render(ID3D12GraphicsCommandList* pd3dCommandList, CCamera* pCamera
 		if (m_pSkyBox) m_pSkyBox->Render(pd3dCommandList, pCamera);
 		if (m_pTerrain) m_pTerrain->Render(pd3dCommandList, pCamera);
 		if (m_pBuildingObject) m_pBuildingObject->Render(pd3dCommandList, pCamera);
-		if (m_ppShaders[0]) m_ppShaders[0]->Render(pd3dCommandList, pCamera, 0, m_bRenderAABB);
+		if (m_ppShaders[0]) m_ppShaders[0]->RenderCulling(pd3dCommandList, pCamera);
 		if (m_pPlayer) m_pPlayer->Render(pd3dCommandList, pCamera);
 		for (int i = 0; i < m_nBillboardObjects; i++)
 		{
-			if (m_ppBillboardObjects[i]) m_ppBillboardObjects[i]->Render(pd3dCommandList, pCamera);
+			if (m_ppBillboardObjects[i])
+			{
+				if (pCamera->IsInFrustum(m_ppBillboardObjects[i]->GetWorldAABB()))
+				{
+					m_ppBillboardObjects[i]->Render(pd3dCommandList, pCamera);
+				}
+			}
 		}
 		if (m_pWater) m_pWater->Render(pd3dCommandList, pCamera);
 		RenderExplosions(pd3dCommandList, pCamera);

@@ -1,0 +1,54 @@
+# 클래스 계층 구조 및 관계 분석
+
+## 1. 게임 오브젝트 (Game Object) 계층
+모든 게임 내 엔티티는 `CGameObject`를 기반으로 합니다.
+- **CGameObject**: 최상위 기저 클래스. 위치, 회전, 스케일(World Matrix)을 관리하고 `CMesh`, `CMaterial` 등을 소유합니다.
+    - **CPlayer**: 플레이어 캐릭터. 카메라 제어(`CCamera*`) 및 입력 처리 로직을 포함합니다.
+    - **CSkyBox**: 스카이박스 렌더링을 위한 특수 오브젝트.
+    - **CHeightMapTerrain**: 지형 데이터를 기반으로 생성되는 오브젝트.
+    - **CWaterObject**: 물 표면을 표현하는 오브젝트.
+    - **CBillboardObject**: 항상 카메라를 향하는 2D 이미지를 렌더링하는 오브젝트 (파티클, 나무 등).
+
+## 2. 메쉬 (Mesh) 계층
+지오메트리 데이터를 관리하는 `CMesh` 클래스와 그 파생형입니다.
+- **CMesh**: 기저 클래스. 정점/인덱스 버퍼 리소스 관리 및 `Render` 메서드 제공.
+    - **CStandardMesh**: 파일에서 로드된 모델 데이터를 처리하는 범용 메쉬.
+    - **CCubeMesh**: 기본적인 큐브 형태의 메쉬.
+    - **CPointMesh**: 점 단위 렌더링을 위한 메쉬.
+    - **CScreenQuadMesh**: 전체 화면 사각형 (포스트 프로세싱이나 UI 등에 사용).
+    - **CUIRectMesh**: UI 요소를 위한 사각형 메쉬.
+    - **CHeightMapGridMesh**: 높이맵 데이터를 기반으로 지형 격자를 생성하는 메쉬.
+
+## 3. 쉐이더 (Shader) 계층
+`CShader`는 PSO(Pipeline State Object)를 캡슐화합니다.
+- **CShader**: 기저 클래스. 쉐이더 컴파일, PSO 생성, 루트 파라미터 설정 등을 담당.
+    - **CStandardShader**: 기본적인 조명과 텍스처링을 처리하는 표준 쉐이더.
+    - **CSkyBoxShader**: 스카이박스 렌더링 전용 (깊이 테스트 설정 등이 다름).
+    - **CTerrainShader**: 지형 렌더링 전용.
+    - **CWaterShader**: 물 렌더링 전용.
+    - **CMirrorShader**: 거울 반사 효과 전용.
+    - **CUIShader**: UI 렌더링 전용 (깊이 테스트 끔, 블렌딩 켬 등).
+    - **CBillboardShader**: 빌보드(지오메트리 쉐이더 등 활용 가능성) 처리.
+
+## 4. 핵심 관리 클래스 관계 (Core Components Relationships)
+
+### CGameFramework (엔진 코어)
+- **소유**: `CScene`, `CPlayer`, `CCamera`, `CTimer`
+- **역할**: D3D12 디바이스 초기화, 메인 루프(`FrameAdvance`) 구동, 커맨드 큐/리스트 관리.
+
+### CScene (씬 관리자)
+- **소유**: `CGameObject` 리스트, `CShader` 리스트, 조명 데이터.
+- **역할**:
+    - `BuildObjects()`: 게임 월드 생성 및 초기화.
+    - `CreateGraphicsRootSignature()`: 전역 루트 시그니처 생성 (모든 쉐이더가 공유).
+    - `Render()`: 쉐이더별로 그룹화하여 렌더링 명령 발행.
+    - **Descriptor Heap**: 전역 SRV/CBV 디스크립터 힙을 관리하는 정적(static) 멤버나 메서드를 제공할 가능성이 높음.
+
+### CCamera (카메라)
+- `CGameObject`를 상속받지 않는 독립적인 클래스입니다.
+- `CPlayer`에 의해 소유되거나 참조되며, 뷰 행렬(View Matrix)과 투영 행렬(Projection Matrix)을 생성합니다.
+- 1인칭, 3인칭 모드 등을 지원하며 뷰 프러스텀 컬링(Frustum Culling)을 위한 정보를 제공합니다.
+
+### 리소스 (Resources)
+- **CMaterial**: `CShader`와 `CTexture` 등을 묶어서 오브젝트의 표면 속성을 정의.
+- **CTexture**: D3D12 텍스처 리소스를 래핑하며, `DDSTextureLoader12` 등을 통해 로드됨. 레퍼런스 카운팅을 통해 여러 재질에서 공유됩니다.

@@ -252,6 +252,11 @@ void CShader::Render(ID3D12GraphicsCommandList* pd3dCommandList, CCamera* pCamer
 	CShader::Render(pd3dCommandList, pCamera, nPipelineState);
 }
 
+void CShader::RenderCulling(ID3D12GraphicsCommandList *pd3dCommandList, CCamera *pCamera)
+{
+	Render(pd3dCommandList, pCamera);
+}
+
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 //
 
@@ -666,6 +671,24 @@ void CObjectsShader::Render(ID3D12GraphicsCommandList *pd3dCommandList, CCamera 
 			m_ppObjects[j]->Render(pd3dCommandList, pCamera);
 			if(bRenderAABB)
 				m_ppObjects[j]->RenderAABB(pd3dCommandList, pCamera, m_ppObjects[j]->m_pAABBMesh, m_ppObjects[j]->m_pAABBMaterial);
+		}
+	}
+}
+
+void CObjectsShader::RenderCulling(ID3D12GraphicsCommandList *pd3dCommandList, CCamera *pCamera)
+{
+	CShader::Render(pd3dCommandList, pCamera, 0);
+
+	for (int j = 0; j < m_nObjects; j++)
+	{
+		if (m_ppObjects[j])
+		{
+			m_ppObjects[j]->Animate(0.16f);
+			m_ppObjects[j]->UpdateTransform(NULL);
+			if (pCamera->IsInFrustum(m_ppObjects[j]->GetWorldAABB()))
+			{
+				m_ppObjects[j]->Render(pd3dCommandList, pCamera);
+			}
 		}
 	}
 }

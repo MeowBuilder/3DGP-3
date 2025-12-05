@@ -1,0 +1,43 @@
+# 프로젝트 구조 및 파일 조직 분석
+
+## 1. 디렉토리 구조
+이 프로젝트는 Direct3D 12 기반의 게임/그래픽스 애플리케이션으로, 소스 코드와 리소스가 명확하게 분리되어 있습니다.
+
+### 주요 폴더
+- **Root**: C++ 소스 코드(.cpp, .h)와 쉐이더 코드(.hlsl), 프로젝트 설정 파일(.sln, .vcxproj)이 위치합니다.
+- **Executable**: 빌드된 실행 파일이 위치할 것으로 예상되는 폴더입니다.
+- **Image**: 텍스처 리소스(.dds, .jpg, .tga)들이 모여 있습니다. (지형, 이펙트, 기본 텍스처 등)
+- **Model**: 3D 모델 데이터(.bin, .txt)와 해당 모델의 텍스처들이 `Textures` 하위 폴더에 있습니다.
+- **Skybox**: 스카이박스용 큐브맵 텍스처가 있습니다.
+- **Terrain**: 지형 렌더링을 위한 하이트맵(HeightMap)과 관련 텍스처들이 있습니다.
+- **UI**: 사용자 인터페이스에 사용되는 이미지 리소스들이 있습니다.
+
+## 2. 주요 소스 파일 그룹
+
+### A. 코어 프레임워크 (Core Framework)
+- **LabProject08-1-3.cpp**: 애플리케이션의 진입점(`WinMain`)입니다. 윈도우 생성 및 메인 메시지 루프를 처리하며, `CGameFramework`를 구동합니다.
+- **GameFramework.h/cpp**: 엔진의 핵심 클래스인 `CGameFramework`를 정의합니다. D3D12 장치 초기화, 스왑 체인 관리, 커맨드 큐/리스트 관리, 그리고 메인 게임 루프(`FrameAdvance`)를 담당합니다.
+- **Timer.h/cpp**: 프레임 간 시간 측정(Delta Time) 및 FPS 계산을 담당합니다.
+- **stdafx.h/cpp**: 미리 컴파일된 헤더(PCH)로, Windows 및 DirectX 헤더들을 포함합니다.
+
+### B. 렌더링 엔진 (Rendering Engine)
+- **Shader.h/cpp**: `CShader` 클래스 및 파생 클래스들을 정의합니다. PSO(Pipeline State Object) 생성, 쉐이더 컴파일, 루트 시그니처와의 연동을 담당합니다.
+- **Mesh.h/cpp**: `CMesh` 클래스 및 파생 클래스들을 정의합니다. 정점 버퍼(Vertex Buffer)와 인덱스 버퍼(Index Buffer)를 관리하며, 지오메트리 데이터를 GPU에 전달합니다.
+- **Camera.h/cpp**: `CCamera` 클래스를 정의합니다. 뷰(View) 및 투영(Projection) 행렬을 생성하고 관리합니다.
+- **d3dx12.h**: 마이크로소프트에서 제공하는 D3D12 헬퍼 라이브러리입니다.
+- **Shaders.hlsl, Light.hlsl, samsha.hlsl**: HLSL 쉐이더 소스 코드들입니다.
+
+### C. 게임 오브젝트 및 씬 (Game Objects & Scene)
+- **Object.h/cpp**: `CGameObject` 기본 클래스를 정의합니다. 오브젝트는 메쉬(`CMesh`), 재질(`CMaterial`), 텍스처(`CTexture`)를 컴포넌트처럼 포함하여 구성됩니다.
+- **Scene.h/cpp**: `CScene` 클래스를 정의합니다. 게임 월드 내의 모든 오브젝트, 조명, 카메라를 관리하며, 렌더링 순서를 제어하고 전역 루트 시그니처(Root Signature)를 생성합니다.
+- **Player.h/cpp**: `CPlayer` 클래스를 정의합니다. `CGameObject`를 상속받으며, 사용자 입력을 처리하고 카메라를 제어합니다.
+
+### D. 리소스 로더 (Resource Loaders)
+- **DDSTextureLoader12.h/cpp**: DDS 형식의 텍스처 파일을 로드하여 D3D12 리소스로 생성하는 헬퍼 클래스입니다.
+- **WICTextureLoader12.h/cpp**: 일반 이미지(PNG, JPG 등)를 로드하는 헬퍼 클래스입니다.
+
+### E. 특수 쉐이더 및 오브젝트 구현
+- **BillboardObject/Shader**: 빌보드 효과 구현.
+- **WaterObject/Shader**: 물 표면 렌더링 구현.
+- **MirrorShader**: 거울 반사 효과 구현.
+- **UIShader/UIRectMesh**: 2D UI 렌더링 구현.
