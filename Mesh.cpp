@@ -687,7 +687,7 @@ CHeightMapGridMesh::CHeightMapGridMesh(ID3D12Device* pd3dDevice, ID3D12GraphicsC
 	m_nVertices = nWidth * nLength;
 	m_nOffset = 0;
 	m_nSlot = 0;
-	m_d3dPrimitiveTopology = D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP;
+	m_d3dPrimitiveTopology = D3D_PRIMITIVE_TOPOLOGY_4_CONTROL_POINT_PATCHLIST; // Changed for Tessellation
 
 	m_nWidth = nWidth;
 	m_nLength = nLength;
@@ -745,28 +745,62 @@ CHeightMapGridMesh::CHeightMapGridMesh(ID3D12Device* pd3dDevice, ID3D12GraphicsC
 	m_ppd3dSubSetIndexUploadBuffers = new ID3D12Resource * [m_nSubMeshes];
 	m_pd3dSubSetIndexBufferViews = new D3D12_INDEX_BUFFER_VIEW[m_nSubMeshes];
 
-	m_pnSubSetIndices[0] = ((nWidth * 2) * (nLength - 1)) + ((nLength - 1) - 1);
+	// For 4-Control Point Patches (Quads), we need 4 indices per patch.
+	// Number of patches = (nWidth - 1) * (nLength - 1)
+	int nPatches = (nWidth - 1) * (nLength - 1);
+	m_pnSubSetIndices[0] = nPatches * 4;
 	m_ppnSubSetIndices[0] = new UINT[m_pnSubSetIndices[0]];
 
-	for (int j = 0, z = 0; z < nLength - 1; z++)
+	int k = 0;
+	for (int z = 0; z < nLength - 1; z++)
 	{
-		if ((z % 2) == 0)
+		for (int x = 0; x < nWidth - 1; x++)
 		{
-			for (int x = 0; x < nWidth; x++)
-			{
-				if ((x == 0) && (z > 0)) m_ppnSubSetIndices[0][j++] = (UINT)(x + (z * nWidth));
-				m_ppnSubSetIndices[0][j++] = (UINT)(x + (z * nWidth));
-				m_ppnSubSetIndices[0][j++] = (UINT)((x + (z * nWidth)) + nWidth);
-			}
-		}
-		else
-		{
-			for (int x = nWidth - 1; x >= 0; x--)
-			{
-				if (x == (nWidth - 1)) m_ppnSubSetIndices[0][j++] = (UINT)(x + (z * nWidth));
-				m_ppnSubSetIndices[0][j++] = (UINT)(x + (z * nWidth));
-				m_ppnSubSetIndices[0][j++] = (UINT)((x + (z * nWidth)) + nWidth);
-			}
+			// Counter-clockwise winding for patches if desired, but topology is just a list of points.
+			// The HS/DS usually expects them in a specific order (e.g. 0,1,2,3 for a quad).
+			// Let's use 0:Bottom-Left, 1:Top-Left, 2:Bottom-Right, 3:Top-Right (Standard Grid)
+			// Wait, standard quad patch order often is 0,1,2,3 forming edges 0-1, 1-2, 2-3, 3-0?
+			// Or 0-1-2-3 as corners.
+			// Let's define: 0=(x,z), 1=(x, z+1), 2=(x+1, z), 3=(x+1, z+1)
+			
+			// Vertex indices in the grid:
+			int i0 = x + (z * nWidth);
+			int i1 = x + ((z + 1) * nWidth);
+			int i2 = (x + 1) + (z * nWidth);
+			int i3 = (x + 1) + ((z + 1) * nWidth);
+
+			// Order: Top-Left, Top-Right, Bottom-Left, Bottom-Right?
+			// HS input patch: 
+			// Let's stick to a consistent winding.
+			// If we want [0] Top-Left, [1] Top-Right, [2] Bottom-Left, [3] Bottom-Right.
+			// Let's assume z+ is "up/forward".
+			
+			// Let's match the shader expectations.
+			// HSTerrainTessellationConstant uses:
+			// e0 = (0+2)*0.5 (Left)
+			// e1 = (0+1)*0.5 (Top)
+			// e2 = (1+3)*0.5 (Right)
+			// e3 = (2+3)*0.5 (Bottom)
+			
+			// So: 
+			// 0 must be Top-Left
+			// 1 must be Top-Right
+			// 2 must be Bottom-Left
+			// 3 must be Bottom-Right
+			
+			// In our grid generation loop:
+			// x increases (Left -> Right)
+			// z increases (Bottom -> Top) (Usually Z is forward in 3D, so "Top" in a map view)
+			
+			// So (x, z+1) is Top-Left relative to (x, z)
+			// (x+1, z+1) is Top-Right
+			// (x, z) is Bottom-Left
+			// (x+1, z) is Bottom-Right
+			
+			m_ppnSubSetIndices[0][k++] = i1; // 0: Top-Left
+			m_ppnSubSetIndices[0][k++] = i3; // 1: Top-Right
+			m_ppnSubSetIndices[0][k++] = i0; // 2: Bottom-Left
+			m_ppnSubSetIndices[0][k++] = i2; // 3: Bottom-Right
 		}
 	}
 

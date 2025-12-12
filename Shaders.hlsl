@@ -307,6 +307,193 @@ VS_TERRAIN_OUTPUT VSTerrain(VS_TERRAIN_INPUT input)
 	return(output);
 }
 
+//-------------------------------------------------------------------------------------------------
+// Terrain Tessellation
+//-------------------------------------------------------------------------------------------------
+
+struct VS_TERRAIN_TESSELLATION_INPUT
+{
+    float3 position : POSITION;
+    float4 color : COLOR;
+    float2 uv0 : TEXCOORD0;
+    float2 uv1 : TEXCOORD1;
+};
+
+struct VS_TERRAIN_TESSELLATION_OUTPUT
+{
+    float3 position : POSITION;
+    float4 color : COLOR;
+    float2 uv0 : TEXCOORD0;
+    float2 uv1 : TEXCOORD1;
+};
+
+VS_TERRAIN_TESSELLATION_OUTPUT VSTerrainTessellation(VS_TERRAIN_TESSELLATION_INPUT input)
+{
+    VS_TERRAIN_TESSELLATION_OUTPUT output;
+    
+    // Pass control point data directly to Hull Shader.
+    // Transform to world space for distance calculation in HS, but do not project yet.
+    output.position = mul(float4(input.position, 1.0f), gmtxGameObject).xyz; 
+    output.color = input.color;
+    output.uv0 = input.uv0;
+    output.uv1 = input.uv1;
+    
+    return output;
+}
+
+struct HS_TERRAIN_TESSELLATION_CONSTANT_DATA_OUTPUT
+{
+    float EdgeTess[4] : SV_TessFactor;
+    float InsideTess[2] : SV_InsideTessFactor;
+};
+
+#define MAX_TESSELLATION_DISTANCE 1500.0f
+#define MIN_TESSELLATION_DISTANCE 200.0f
+#define MAX_TESSELLATION_FACTOR 64.0f
+#define MIN_TESSELLATION_FACTOR 1.0f
+
+float CalculateTessellationFactor(float3 p)
+{
+    float d = distance(p, gvCameraPosition);
+    float s = saturate((d - MIN_TESSELLATION_DISTANCE) / (MAX_TESSELLATION_DISTANCE - MIN_TESSELLATION_DISTANCE));
+    return lerp(MAX_TESSELLATION_FACTOR, MIN_TESSELLATION_FACTOR, s);
+}
+
+HS_TERRAIN_TESSELLATION_CONSTANT_DATA_OUTPUT HSTerrainTessellationConstant(InputPatch<VS_TERRAIN_TESSELLATION_OUTPUT, 4> inputPatch)
+{
+    HS_TERRAIN_TESSELLATION_CONSTANT_DATA_OUTPUT output;
+
+    float3 e0 = (inputPatch[0].position + inputPatch[2].position) * 0.5f; // Left Edge (0-2)
+    float3 e1 = (inputPatch[0].position + inputPatch[1].position) * 0.5f; // Top Edge (0-1)
+    float3 e2 = (inputPatch[1].position + inputPatch[3].position) * 0.5f; // Right Edge (1-3)
+    float3 e3 = (inputPatch[2].position + inputPatch[3].position) * 0.5f; // Bottom Edge (2-3)
+    float3 center = (inputPatch[0].position + inputPatch[1].position + inputPatch[2].position + inputPatch[3].position) * 0.25f;
+
+    output.EdgeTess[0] = CalculateTessellationFactor(e0);
+    output.EdgeTess[1] = CalculateTessellationFactor(e1);
+    output.EdgeTess[2] = CalculateTessellationFactor(e2);
+    output.EdgeTess[3] = CalculateTessellationFactor(e3);
+
+    output.InsideTess[0] = CalculateTessellationFactor(center);
+    output.InsideTess[1] = output.InsideTess[0];
+
+    return output;
+}
+
+struct HS_TERRAIN_TESSELLATION_OUTPUT
+{
+    float3 position : POSITION;
+    float4 color : COLOR;
+    float2 uv0 : TEXCOORD0;
+    float2 uv1 : TEXCOORD1;
+};
+
+[domain("quad")]
+[partitioning("integer")]
+[outputtopology("triangle_cw")]
+[outputcontrolpoints(4)]
+[patchconstantfunc("HSTerrainTessellationConstant")]
+[maxtessfactor(64.0f)]
+HS_TERRAIN_TESSELLATION_OUTPUT HSTerrainTessellation(InputPatch<VS_TERRAIN_TESSELLATION_OUTPUT, 4> inputPatch, uint uCPID : SV_OutputControlPointID)
+{
+    HS_TERRAIN_TESSELLATION_OUTPUT output;
+    output.position = inputPatch[uCPID].position;
+    output.color = inputPatch[uCPID].color;
+    output.uv0 = inputPatch[uCPID].uv0;
+    output.uv1 = inputPatch[uCPID].uv1;
+    return output;
+}
+
+struct DS_TERRAIN_TESSELLATION_OUTPUT
+{
+    float4 position : SV_POSITION;
+    float4 color : COLOR;
+    float2 uv0 : TEXCOORD0;
+    float2 uv1 : TEXCOORD1;
+};
+
+[domain("quad")]
+DS_TERRAIN_TESSELLATION_OUTPUT DSTerrainTessellation(HS_TERRAIN_TESSELLATION_CONSTANT_DATA_OUTPUT input, float2 uv : SV_DomainLocation, const OutputPatch<HS_TERRAIN_TESSELLATION_OUTPUT, 4> quad)
+{
+    DS_TERRAIN_TESSELLATION_OUTPUT output;
+
+    // Bilinear interpolation
+    float3 vPos1 = lerp(quad[0].position, quad[1].position, uv.x);
+    float3 vPos2 = lerp(quad[2].position, quad[3].position, uv.x);
+    float3 vPos = lerp(vPos1, vPos2, uv.y);
+
+    float2 uv0_1 = lerp(quad[0].uv0, quad[1].uv0, uv.x);
+    float2 uv0_2 = lerp(quad[2].uv0, quad[3].uv0, uv.x);
+    float2 uv0 = lerp(uv0_1, uv0_2, uv.y);
+
+    float2 uv1_1 = lerp(quad[0].uv1, quad[1].uv1, uv.x);
+    float2 uv1_2 = lerp(quad[2].uv1, quad[3].uv1, uv.x);
+    float2 uv1 = lerp(uv1_1, uv1_2, uv.y);
+    
+    float4 color1 = lerp(quad[0].color, quad[1].color, uv.x);
+    float4 color2 = lerp(quad[2].color, quad[3].color, uv.x);
+    output.color = lerp(color1, color2, uv.y);
+
+    // Displacement Mapping
+    float h = gtxtTerrainTexture.SampleLevel(gssWrap, uv0, 0).r; // Assuming height is in Red channel
+    
+    // Adjust height scale. Assuming height map stores 0-1, we need to scale it to world height.
+    // The original VSTerrain logic assumed the mesh y-positions were already set by CPU.
+    // Here we reconstruct the height. However, the input control points already have the base height from CPU mesh generation.
+    // If we want detailed displacement, we should use a high-res height map or detail map here.
+    // For now, let's assume the CPU mesh provides the coarse shape, and we add detail or just rely on the interpolated position.
+    // But since the original mesh IS the heightmap mesh, the 'vPos.y' is already the correct height from the CPU grid.
+    // Interpolating it gives the correct tessellated height.
+    // If we want to add extra detail from a displacement map:
+    // vPos.y += (h - vPos.y) * displacementScale; 
+    
+    // Since the original mesh is generated from heightmap, simple interpolation reconstructs the surface.
+    // But to get *extra* detail (true displacement mapping), we would need a higher res map than the vertex grid.
+    // If the texture and grid are 1:1, bilinear interpolation is sufficient to smooth it.
+    // But DSTerrainTessellation allows the mesh to be smoother than the linear interpolation of the original grid if we sample the texture again.
+    
+    // Re-sample height to get exact height at this new tessellated position
+    // Note: The CPU mesh generation might have scaled the height. We need to match that scale.
+    // We don't have the scale passed in here easily without a constant buffer.
+    // HOWEVER, `vPos.y` is the interpolated height.
+    // If we want the *texture* height (which might be more detailed/curved than the linear interpolation of 4 points), we should use `h`.
+    // But we need the Y-scale factor.
+    // Let's assume for now that simple interpolation of the existing control points is what is desired for smoothing, 
+    // or if we strictly want to match the heightmap:
+    
+    // For now, simple smoothing (Phong Tessellation or just interpolation) is a good start. 
+    // To match the heightmap exactly:
+    // vPos.y = h * gGameObjectInfo.m_vScale.y; // We'd need to pass scale in CB.
+    
+    // Let's stick to simple interpolation first. It smooths the terrain geometry.
+    // To make it better, let's actually re-sample the height if we can, or just trust the interpolation.
+    // Given we are doing LOD, simply interpolating the coarse mesh vertices is the standard "PN-Triangles" or similar approach,
+    // but for terrain, we usually want to sample the heightmap again.
+    
+    // Let's use the interpolated position, but if we had the scale, we could override Y.
+    // For this implementation, I will just use the interpolated position `vPos`.
+    // This effectively gives us geometric subdivision (smoother silhouette if the control points were curved, but here they are a grid).
+    // Actually, on a flat grid, linear interpolation just gives smaller flat quads.
+    // To get curves, we MUST sample the heightmap.
+    
+    // Since we don't have the scale in the shader easily (unless we add it to cbGameObjectInfo), 
+    // let's try to infer it or just assume the texture sampling is needed.
+    // Problem: The `h` is 0..1. The world `y` is 0..ScaleY.
+    // If we rely on linear interpolation of Control Points, we get a flat surface between grid points.
+    // WE NEED DISPLACEMENT to see extra detail.
+    
+    // WORKAROUND: In CHeightMapTerrain, the mesh has correct Y.
+    // We will assume the `gtxtTerrainTexture` holds the height data.
+    // Let's rely on the interpolated Y for now to avoid flattening the terrain if scale is unknown.
+    // If you want "True" displacement, we need to pass the height scale.
+    
+    output.position = mul(mul(float4(vPos, 1.0f), gmtxView), gmtxProjection);
+    output.uv0 = uv0;
+    output.uv1 = uv1;
+
+    return output;
+}
+
 float4 PSTerrain(VS_TERRAIN_OUTPUT input) : SV_TARGET
 {
 	float4 cBaseTexColor = gtxtTerrainTexture.Sample(gssWrap, input.uv0);
@@ -540,4 +727,54 @@ float4 PSMirror(VS_STANDARD_OUTPUT input) : SV_TARGET
     float4 cColor = gMaterial.m_cAmbient;
     cColor.a = gMaterial.m_cAmbient.a;
     return cColor;
+}
+
+//=================================================================================================================================================
+// MOTION BLUR COMPUTE SHADER
+//=================================================================================================================================================
+
+RWTexture2D<float4> gOutput : register(u0);
+Texture2D<float4> gInput : register(t0); // Scene Texture
+
+cbuffer cbMotionBlur : register(b4)
+{
+    int g_nWidth;
+    int g_nHeight;
+    float g_fBlurStrength;
+    int g_nDirection; // Not used yet, assumed radial
+};
+
+[numthreads(32, 32, 1)]
+void CSMotionBlur(uint3 dispatchThreadID : SV_DispatchThreadID)
+{
+    if (dispatchThreadID.x >= g_nWidth || dispatchThreadID.y >= g_nHeight)
+        return;
+
+    int2 center = int2(g_nWidth / 2, g_nHeight / 2);
+    int2 pos = int2(dispatchThreadID.x, dispatchThreadID.y);
+    float2 dir = float2(pos - center);
+    float dist = length(dir);
+    
+    dir = normalize(dir);
+
+    float4 color = float4(0, 0, 0, 0);
+    int nSamples = 10;
+    
+    // Scale blur strength by distance from center to get radial effect
+    float strength = g_fBlurStrength * (dist / (float)g_nWidth);
+
+    for (int i = 0; i < nSamples; i++)
+    {
+        float scale = 1.0f - strength * (float)i / (float)nSamples;
+        int2 samplePos = center + dir * dist * scale;
+        
+        // Clamp to screen
+        samplePos = clamp(samplePos, int2(0, 0), int2(g_nWidth - 1, g_nHeight - 1));
+        
+        color += gInput[samplePos];
+    }
+    
+    color /= (float)nSamples;
+    
+    gOutput[pos] = color;
 }

@@ -183,6 +183,7 @@ protected:
 	CCubeMesh* m_pAABBMesh = NULL;
 	CMaterial* m_pAABBMaterial = NULL;
 	bool m_bRenderAABB = false;
+	bool m_bWireframe = false; // Added for wireframe toggle
 
 	CBillboardShader*					m_pBillboardShader = NULL;
 	CTexture*							m_pBillboardTexture = NULL;

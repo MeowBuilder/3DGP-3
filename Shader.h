@@ -20,6 +20,9 @@ protected:
 	ID3DBlob*							m_pd3dVertexShaderBlob = NULL;
 	ID3DBlob*							m_pd3dPixelShaderBlob = NULL;
 	ID3DBlob*							m_pd3dGeometryShaderBlob = NULL; //
+	ID3DBlob*							m_pd3dHullShaderBlob = NULL;
+	ID3DBlob*							m_pd3dDomainShaderBlob = NULL;
+	ID3DBlob*							m_pd3dComputeShaderBlob = NULL;
 
 	int									m_nPipelineStates = 0;
 	ID3D12PipelineState**				m_ppd3dPipelineStates = NULL;
@@ -39,6 +42,9 @@ public:
 
 	virtual D3D12_SHADER_BYTECODE CreateVertexShader();
 	virtual D3D12_SHADER_BYTECODE CreatePixelShader();
+	virtual D3D12_SHADER_BYTECODE CreateHullShader();
+	virtual D3D12_SHADER_BYTECODE CreateDomainShader();
+	virtual D3D12_SHADER_BYTECODE CreateComputeShader();
 
 	D3D12_SHADER_BYTECODE CompileShaderFromFile(WCHAR *pszFileName, LPCSTR pszShaderName, LPCSTR pszShaderProfile, ID3DBlob **ppd3dShaderBlob);
 	D3D12_SHADER_BYTECODE ReadCompiledShaderFromFile(WCHAR *pszFileName, ID3DBlob **ppd3dShaderBlob=NULL);
@@ -61,6 +67,22 @@ public:
 	virtual void BuildObjects(ID3D12Device *pd3dDevice, ID3D12GraphicsCommandList *pd3dCommandList, ID3D12RootSignature *pd3dGraphicsRootSignature, void *pContext = NULL) { }
 	virtual void AnimateObjects(float fTimeElapsed) { }
 	virtual void ReleaseObjects() { }
+	
+	ID3D12PipelineState* GetPipelineState(int nPipelineState) { return m_ppd3dPipelineStates[nPipelineState]; }
+};
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+//
+class CMotionBlurShader : public CShader
+{
+public:
+	CMotionBlurShader();
+	virtual ~CMotionBlurShader();
+
+	virtual D3D12_SHADER_BYTECODE CreateComputeShader();
+	virtual void CreateShader(ID3D12Device* pd3dDevice, ID3D12GraphicsCommandList* pd3dCommandList, ID3D12RootSignature* pd3dRootSignature);
+	
+	void Dispatch(ID3D12GraphicsCommandList* pd3dCommandList, int nWidth, int nHeight, int nDepth);
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -201,6 +223,8 @@ public:
 	virtual D3D12_INPUT_LAYOUT_DESC CreateInputLayout();
 	virtual D3D12_SHADER_BYTECODE CreateVertexShader();
 	virtual D3D12_SHADER_BYTECODE CreatePixelShader();
+	virtual D3D12_SHADER_BYTECODE CreateHullShader();
+	virtual D3D12_SHADER_BYTECODE CreateDomainShader();
 
 	virtual void CreateShader(ID3D12Device* pd3dDevice, ID3D12GraphicsCommandList* pd3dCommandList, ID3D12RootSignature* pd3dGraphicsRootSignature);
 };
