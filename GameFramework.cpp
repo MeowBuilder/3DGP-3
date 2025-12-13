@@ -21,6 +21,11 @@ CGameFramework::CGameFramework()
 	m_pd3dRtvDescriptorHeap = NULL;
 	m_pd3dDsvDescriptorHeap = NULL;
 
+	m_pSceneTexture = NULL;
+	m_pBlurTexture = NULL;
+	m_pd3dCbvSrvUavDescriptorHeap = NULL;
+    m_pMotionBlurShader = NULL;
+
 	gnRtvDescriptorIncrementSize = 0;
 	gnDsvDescriptorIncrementSize = 0;
 
@@ -49,8 +54,11 @@ bool CGameFramework::OnCreate(HINSTANCE hInstance, HWND hMainWnd)
 	CreateDirect3DDevice();
 	CreateCommandQueueAndList();
 	CreateRtvAndDsvDescriptorHeaps();
+	CreateCbvSrvUavDescriptorHeap(); // New
 	CreateSwapChain();
 	CreateDepthStencilView();
+	CreateSceneTexture(); // New
+	CreateBlurTexture(); // New
 
 	CoInitialize(NULL);
 
@@ -193,7 +201,7 @@ void CGameFramework::CreateRtvAndDsvDescriptorHeaps()
 {
 	D3D12_DESCRIPTOR_HEAP_DESC d3dDescriptorHeapDesc;
 	::ZeroMemory(&d3dDescriptorHeapDesc, sizeof(D3D12_DESCRIPTOR_HEAP_DESC));
-	d3dDescriptorHeapDesc.NumDescriptors = m_nSwapChainBuffers;
+	d3dDescriptorHeapDesc.NumDescriptors = m_nSwapChainBuffers + 1; // +1 for Off-screen Scene Texture
 	d3dDescriptorHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
 	d3dDescriptorHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
 	d3dDescriptorHeapDesc.NodeMask = 0;
@@ -202,6 +210,10 @@ void CGameFramework::CreateRtvAndDsvDescriptorHeaps()
 	d3dDescriptorHeapDesc.NumDescriptors = 1;
 	d3dDescriptorHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
 	hResult = m_pd3dDevice->CreateDescriptorHeap(&d3dDescriptorHeapDesc, __uuidof(ID3D12DescriptorHeap), (void **)&m_pd3dDsvDescriptorHeap);
+
+    // Store CPU Handle for Scene Texture RTV (It will be at index m_nSwapChainBuffers)
+    m_d3dSceneTextureRtvCPUHandle = m_pd3dRtvDescriptorHeap->GetCPUDescriptorHandleForHeapStart();
+    m_d3dSceneTextureRtvCPUHandle.ptr += (m_nSwapChainBuffers * m_pd3dDevice->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV));
 }
 
 void CGameFramework::CreateRenderTargetViews()
@@ -213,6 +225,12 @@ void CGameFramework::CreateRenderTargetViews()
 		m_pd3dDevice->CreateRenderTargetView(m_ppd3dSwapChainBackBuffers[i], NULL, d3dRtvCPUDescriptorHandle);
 		d3dRtvCPUDescriptorHandle.ptr += gnRtvDescriptorIncrementSize;
 	}
+    
+    // Create RTV for Scene Texture if it exists (might be called during resize)
+    if (m_pSceneTexture)
+    {
+        m_pd3dDevice->CreateRenderTargetView(m_pSceneTexture, NULL, m_d3dSceneTextureRtvCPUHandle);
+    }
 }
 
 void CGameFramework::CreateDepthStencilView()
@@ -253,6 +271,116 @@ void CGameFramework::CreateDepthStencilView()
 
 	D3D12_CPU_DESCRIPTOR_HANDLE d3dDsvCPUDescriptorHandle = m_pd3dDsvDescriptorHeap->GetCPUDescriptorHandleForHeapStart();
 	m_pd3dDevice->CreateDepthStencilView(m_pd3dDepthStencilBuffer, &d3dDepthStencilViewDesc, d3dDsvCPUDescriptorHandle);
+}
+
+void CGameFramework::CreateCbvSrvUavDescriptorHeap()
+{
+	D3D12_DESCRIPTOR_HEAP_DESC d3dDescriptorHeapDesc;
+	::ZeroMemory(&d3dDescriptorHeapDesc, sizeof(D3D12_DESCRIPTOR_HEAP_DESC));
+	// 1 for SceneTexture SRV, 1 for BlurTexture UAV, 1 for BlurTexture SRV (if needed for Copy or debug)
+    // Plus we need space for our scene resources if we merge heaps, but currently Scene uses its own heap.
+    // However, Compute Shader needs a heap that contains UAV and SRV.
+    // Let's create a small heap for Post-Process.
+	d3dDescriptorHeapDesc.NumDescriptors = 5; 
+	d3dDescriptorHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+	d3dDescriptorHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+	d3dDescriptorHeapDesc.NodeMask = 0;
+	m_pd3dDevice->CreateDescriptorHeap(&d3dDescriptorHeapDesc, __uuidof(ID3D12DescriptorHeap), (void**)&m_pd3dCbvSrvUavDescriptorHeap);
+}
+
+void CGameFramework::CreateSceneTexture()
+{
+	// 1. Create Resource
+	D3D12_RESOURCE_DESC d3dResourceDesc;
+	::ZeroMemory(&d3dResourceDesc, sizeof(D3D12_RESOURCE_DESC));
+	d3dResourceDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+	d3dResourceDesc.Alignment = 0;
+	d3dResourceDesc.Width = m_nWndClientWidth;
+	d3dResourceDesc.Height = m_nWndClientHeight;
+	d3dResourceDesc.DepthOrArraySize = 1;
+	d3dResourceDesc.MipLevels = 1;
+	d3dResourceDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+	d3dResourceDesc.SampleDesc.Count = 1;
+	d3dResourceDesc.SampleDesc.Quality = 0;
+	d3dResourceDesc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+	d3dResourceDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET; // Used as RTV
+
+	D3D12_CLEAR_VALUE d3dClearValue;
+	d3dClearValue.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+	d3dClearValue.Color[0] = 0.0f;
+	d3dClearValue.Color[1] = 0.125f;
+	d3dClearValue.Color[2] = 0.3f;
+	d3dClearValue.Color[3] = 1.0f;
+
+	D3D12_HEAP_PROPERTIES d3dHeapProperties;
+	::ZeroMemory(&d3dHeapProperties, sizeof(D3D12_HEAP_PROPERTIES));
+	d3dHeapProperties.Type = D3D12_HEAP_TYPE_DEFAULT;
+	d3dHeapProperties.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
+	d3dHeapProperties.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
+	d3dHeapProperties.CreationNodeMask = 1;
+	d3dHeapProperties.VisibleNodeMask = 1;
+
+	m_pd3dDevice->CreateCommittedResource(&d3dHeapProperties, D3D12_HEAP_FLAG_NONE, &d3dResourceDesc, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, &d3dClearValue, __uuidof(ID3D12Resource), (void**)&m_pSceneTexture);
+
+    // Create RTV for Scene Texture
+    m_pd3dDevice->CreateRenderTargetView(m_pSceneTexture, NULL, m_d3dSceneTextureRtvCPUHandle);
+
+    // 3. Create SRV (In the new CBV_SRV_UAV Heap)
+	D3D12_SHADER_RESOURCE_VIEW_DESC d3dSrvDesc;
+	::ZeroMemory(&d3dSrvDesc, sizeof(D3D12_SHADER_RESOURCE_VIEW_DESC));
+	d3dSrvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+	d3dSrvDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+	d3dSrvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+	d3dSrvDesc.Texture2D.MipLevels = 1;
+
+	D3D12_CPU_DESCRIPTOR_HANDLE d3dSrvCpuHandle = m_pd3dCbvSrvUavDescriptorHeap->GetCPUDescriptorHandleForHeapStart();
+    // Index 0: Scene Texture SRV
+	m_pd3dDevice->CreateShaderResourceView(m_pSceneTexture, &d3dSrvDesc, d3dSrvCpuHandle);
+    m_d3dSceneTextureSrvGPUHandle = m_pd3dCbvSrvUavDescriptorHeap->GetGPUDescriptorHandleForHeapStart();
+}
+
+void CGameFramework::CreateBlurTexture()
+{
+	// 1. Create Resource
+	D3D12_RESOURCE_DESC d3dResourceDesc;
+	::ZeroMemory(&d3dResourceDesc, sizeof(D3D12_RESOURCE_DESC));
+	d3dResourceDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+	d3dResourceDesc.Alignment = 0;
+	d3dResourceDesc.Width = m_nWndClientWidth;
+	d3dResourceDesc.Height = m_nWndClientHeight;
+	d3dResourceDesc.DepthOrArraySize = 1;
+	d3dResourceDesc.MipLevels = 1;
+	d3dResourceDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+	d3dResourceDesc.SampleDesc.Count = 1;
+	d3dResourceDesc.SampleDesc.Quality = 0;
+	d3dResourceDesc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+	d3dResourceDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS; // Allow UAV
+
+	D3D12_HEAP_PROPERTIES d3dHeapProperties;
+	::ZeroMemory(&d3dHeapProperties, sizeof(D3D12_HEAP_PROPERTIES));
+	d3dHeapProperties.Type = D3D12_HEAP_TYPE_DEFAULT;
+	d3dHeapProperties.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
+	d3dHeapProperties.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
+	d3dHeapProperties.CreationNodeMask = 1;
+	d3dHeapProperties.VisibleNodeMask = 1;
+
+	m_pd3dDevice->CreateCommittedResource(&d3dHeapProperties, D3D12_HEAP_FLAG_NONE, &d3dResourceDesc, D3D12_RESOURCE_STATE_COPY_SOURCE, NULL, __uuidof(ID3D12Resource), (void**)&m_pBlurTexture);
+
+	// 2. Create UAV
+	D3D12_UNORDERED_ACCESS_VIEW_DESC d3dUavDesc;
+	::ZeroMemory(&d3dUavDesc, sizeof(D3D12_UNORDERED_ACCESS_VIEW_DESC));
+	d3dUavDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+	d3dUavDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+	d3dUavDesc.Texture2D.MipSlice = 0;
+	d3dUavDesc.Texture2D.PlaneSlice = 0;
+
+    D3D12_CPU_DESCRIPTOR_HANDLE d3dUavCpuHandle = m_pd3dCbvSrvUavDescriptorHeap->GetCPUDescriptorHandleForHeapStart();
+    d3dUavCpuHandle.ptr += ::gnCbvSrvDescriptorIncrementSize; // Index 1: Blur Texture UAV
+    
+	m_pd3dDevice->CreateUnorderedAccessView(m_pBlurTexture, NULL, &d3dUavDesc, d3dUavCpuHandle);
+    
+    m_d3dBlurTextureUavGPUHandle = m_pd3dCbvSrvUavDescriptorHeap->GetGPUDescriptorHandleForHeapStart();
+    m_d3dBlurTextureUavGPUHandle.ptr += ::gnCbvSrvDescriptorIncrementSize;
 }
 
 void CGameFramework::ChangeSwapChainState()
@@ -372,6 +500,10 @@ void CGameFramework::OnDestroy()
 
 	::CloseHandle(m_hFenceEvent);
 
+	if (m_pSceneTexture) m_pSceneTexture->Release();
+	if (m_pBlurTexture) m_pBlurTexture->Release();
+	if (m_pd3dCbvSrvUavDescriptorHeap) m_pd3dCbvSrvUavDescriptorHeap->Release();
+
 	if (m_pd3dDepthStencilBuffer) m_pd3dDepthStencilBuffer->Release();
 	if (m_pd3dDsvDescriptorHeap) m_pd3dDsvDescriptorHeap->Release();
 
@@ -407,6 +539,10 @@ void CGameFramework::BuildObjects()
 	m_pScene = new CScene(this);
 	if (m_pScene) m_pScene->BuildObjects(m_pd3dDevice, m_pd3dCommandList);
 
+    // Create Motion Blur Shader
+    m_pMotionBlurShader = new CMotionBlurShader();
+    m_pMotionBlurShader->CreateShader(m_pd3dDevice, m_pd3dCommandList, NULL); // RootSig created internally
+
 	m_pPlayer = m_pScene->m_pPlayer;
 	m_pCamera = m_pPlayer->GetCamera();
 
@@ -418,6 +554,7 @@ void CGameFramework::BuildObjects()
 
 	if (m_pScene) m_pScene->ReleaseUploadBuffers();
 	if (m_pPlayer) m_pPlayer->ReleaseUploadBuffers();
+    if (m_pMotionBlurShader) m_pMotionBlurShader->ReleaseUploadBuffers();
 
 	m_GameTimer.Reset();
 }
@@ -425,6 +562,7 @@ void CGameFramework::BuildObjects()
 void CGameFramework::ReleaseObjects()
 {
 	if (m_pPlayer) m_pPlayer->Release();
+    if (m_pMotionBlurShader) m_pMotionBlurShader->Release();
 
 	if (m_pScene) m_pScene->ReleaseObjects();
 	if (m_pScene) delete m_pScene;
@@ -527,43 +665,197 @@ void CGameFramework::FrameAdvance()
 	HRESULT hResult = m_pd3dCommandAllocator->Reset();
 	hResult = m_pd3dCommandList->Reset(m_pd3dCommandAllocator, NULL);
 
+    // [SAFETY CHECK] If scene texture is missing, skip post-process logic to avoid crash
+    if (!m_pSceneTexture) 
+    {
+        // Fallback: Just render to BackBuffer directly (Simple render path)
+        D3D12_RESOURCE_BARRIER barrier;
+        ::ZeroMemory(&barrier, sizeof(barrier));
+        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+        barrier.Transition.pResource = m_ppd3dSwapChainBackBuffers[m_nSwapChainBufferIndex];
+        barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
+        barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
+        barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        m_pd3dCommandList->ResourceBarrier(1, &barrier);
+
+        D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = m_pd3dRtvDescriptorHeap->GetCPUDescriptorHandleForHeapStart();
+        rtvHandle.ptr += (m_nSwapChainBufferIndex * gnRtvDescriptorIncrementSize);
+        
+        D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle = m_pd3dDsvDescriptorHeap->GetCPUDescriptorHandleForHeapStart();
+        
+        float clearColor[4] = { 0.0f, 0.125f, 0.3f, 1.0f };
+        m_pd3dCommandList->ClearRenderTargetView(rtvHandle, clearColor, 0, NULL);
+        m_pd3dCommandList->ClearDepthStencilView(dsvHandle, D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL, 1.0f, 0, 0, NULL);
+        m_pd3dCommandList->OMSetRenderTargets(1, &rtvHandle, TRUE, &dsvHandle);
+
+        if (m_pScene) m_pScene->Render(m_pd3dCommandList, m_pCamera);
+
+        barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
+        barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
+        m_pd3dCommandList->ResourceBarrier(1, &barrier);
+        
+        hResult = m_pd3dCommandList->Close();
+        ID3D12CommandList* ppCommandLists[] = { m_pd3dCommandList };
+        m_pd3dCommandQueue->ExecuteCommandLists(1, ppCommandLists);
+        WaitForGpuComplete();
+        MoveToNextFrame();
+        return; 
+    }
+
+    //=============================================================================================
+    // 1. Render Scene to Off-screen Texture (m_pSceneTexture)
+    //=============================================================================================
 	D3D12_RESOURCE_BARRIER d3dResourceBarrier;
 	::ZeroMemory(&d3dResourceBarrier, sizeof(D3D12_RESOURCE_BARRIER));
 	d3dResourceBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
 	d3dResourceBarrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
-	d3dResourceBarrier.Transition.pResource = m_ppd3dSwapChainBackBuffers[m_nSwapChainBufferIndex];
-	d3dResourceBarrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
+	d3dResourceBarrier.Transition.pResource = m_pSceneTexture;
+	d3dResourceBarrier.Transition.StateBefore = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
 	d3dResourceBarrier.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
 	d3dResourceBarrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
 	m_pd3dCommandList->ResourceBarrier(1, &d3dResourceBarrier);
 
-	D3D12_CPU_DESCRIPTOR_HANDLE d3dRtvCPUDescriptorHandle = m_pd3dRtvDescriptorHeap->GetCPUDescriptorHandleForHeapStart();
-	d3dRtvCPUDescriptorHandle.ptr += (m_nSwapChainBufferIndex * gnRtvDescriptorIncrementSize);
-
 	float pfClearColor[4] = { 0.0f, 0.125f, 0.3f, 1.0f };
-	m_pd3dCommandList->ClearRenderTargetView(d3dRtvCPUDescriptorHandle, pfClearColor, 0, NULL);
+	m_pd3dCommandList->ClearRenderTargetView(m_d3dSceneTextureRtvCPUHandle, pfClearColor, 0, NULL);
 
 	D3D12_CPU_DESCRIPTOR_HANDLE d3dDsvCPUDescriptorHandle = m_pd3dDsvDescriptorHeap->GetCPUDescriptorHandleForHeapStart();
 	m_pd3dCommandList->ClearDepthStencilView(d3dDsvCPUDescriptorHandle, D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL, 1.0f, 0, 0, NULL);
 
-	m_pd3dCommandList->OMSetRenderTargets(1, &d3dRtvCPUDescriptorHandle, TRUE, &d3dDsvCPUDescriptorHandle);
+	m_pd3dCommandList->OMSetRenderTargets(1, &m_d3dSceneTextureRtvCPUHandle, TRUE, &d3dDsvCPUDescriptorHandle);
 
 	if (m_GameState == GameState::InGame)
 	{
 		if (m_pScene) m_pScene->Render(m_pd3dCommandList, m_pCamera);
-
-#ifdef _WITH_PLAYER_TOP
-		m_pd3dCommandList->ClearDepthStencilView(d3dDsvCPUDescriptorHandle, D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL, 1.0f, 0, 0, NULL);
-#endif
 	}
 	else
 	{
 		if (m_pScene) m_pScene->Render(m_pd3dCommandList, NULL);
 	}
 
+    // Transition Scene Texture to SRV for Compute Shader (or Copy)
+	d3dResourceBarrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
+	d3dResourceBarrier.Transition.StateAfter = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE; // Ready for SRV (CS)
+	m_pd3dCommandList->ResourceBarrier(1, &d3dResourceBarrier);
+
+    //=============================================================================================
+    // 2. Motion Blur Compute Shader
+    //=============================================================================================
+    ID3D12Resource* pResultTexture = m_pSceneTexture; // Default if blur not applied
+
+    if (m_GameState == GameState::InGame && m_pMotionBlurShader && m_pBlurTexture && m_pMotionBlurShader->GetPipelineState(0))
+    {
+        // Transition Blur Texture to UAV
+        d3dResourceBarrier.Transition.pResource = m_pBlurTexture;
+        d3dResourceBarrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE; 
+        d3dResourceBarrier.Transition.StateAfter = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        m_pd3dCommandList->ResourceBarrier(1, &d3dResourceBarrier);
+        
+        // Bind Descriptor Heap for CS
+        ID3D12DescriptorHeap* ppHeaps[] = { m_pd3dCbvSrvUavDescriptorHeap };
+        m_pd3dCommandList->SetDescriptorHeaps(_countof(ppHeaps), ppHeaps);
+
+        // [FIX] Set Compute Root Signature BEFORE setting root parameters
+        m_pd3dCommandList->SetComputeRootSignature(m_pMotionBlurShader->m_pd3dComputeRootSignature);
+
+        // Bind Root Parameters
+        // 0: UAV (BlurTexture)
+        m_pd3dCommandList->SetComputeRootDescriptorTable(0, m_d3dBlurTextureUavGPUHandle);
+        // 1: SRV (SceneTexture)
+        m_pd3dCommandList->SetComputeRootDescriptorTable(1, m_d3dSceneTextureSrvGPUHandle);
+        
+        // 2: Constants
+        float fSpeed = 0.0f;
+        // Calculate player speed factor
+        if (m_pPlayer)
+        {
+            XMFLOAT3 v = m_pPlayer->GetVelocity();
+            float speed = sqrtf(v.x*v.x + v.y*v.y + v.z*v.z);
+            fSpeed = speed * 0.001f; // Scale factor: Reduced for less aggressive blur
+            if (fSpeed > 1.0f) fSpeed = 1.0f; // Max blur
+        }
+        
+        struct { int w; int h; float s; int d; } cb = { m_nWndClientWidth, m_nWndClientHeight, fSpeed, 0 };
+        m_pd3dCommandList->SetComputeRoot32BitConstants(2, 4, &cb, 0);
+
+        // Dispatch
+        // Threads (32, 32, 1). Groups = ceil(Width/32), ceil(Height/32)
+        int nGroupsX = (m_nWndClientWidth + 31) / 32;
+        int nGroupsY = (m_nWndClientHeight + 31) / 32;
+        m_pMotionBlurShader->Dispatch(m_pd3dCommandList, nGroupsX, nGroupsY, 1);
+
+        // Transition Blur Texture to COPY_SOURCE
+        d3dResourceBarrier.Transition.pResource = m_pBlurTexture;
+        d3dResourceBarrier.Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        d3dResourceBarrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        m_pd3dCommandList->ResourceBarrier(1, &d3dResourceBarrier);
+
+        pResultTexture = m_pBlurTexture;
+    }
+    else
+    {
+        // If not blurring, prepare SceneTexture for Copy
+        d3dResourceBarrier.Transition.pResource = m_pSceneTexture;
+        d3dResourceBarrier.Transition.StateBefore = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+        d3dResourceBarrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        m_pd3dCommandList->ResourceBarrier(1, &d3dResourceBarrier);
+        
+        pResultTexture = m_pSceneTexture;
+    }
+
+    //=============================================================================================
+    // 3. Copy Result to BackBuffer
+    //=============================================================================================
+    
+    // Transition BackBuffer to COPY_DEST
+	d3dResourceBarrier.Transition.pResource = m_ppd3dSwapChainBackBuffers[m_nSwapChainBufferIndex];
+	d3dResourceBarrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
+	d3dResourceBarrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
+	m_pd3dCommandList->ResourceBarrier(1, &d3dResourceBarrier);
+
+    m_pd3dCommandList->CopyResource(m_ppd3dSwapChainBackBuffers[m_nSwapChainBufferIndex], pResultTexture);
+
+    // Restore Source State
+    if (pResultTexture == m_pSceneTexture)
+    {
+        d3dResourceBarrier.Transition.pResource = m_pSceneTexture;
+        d3dResourceBarrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        d3dResourceBarrier.Transition.StateAfter = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+        m_pd3dCommandList->ResourceBarrier(1, &d3dResourceBarrier);
+    }
+    // BlurTexture stays in COPY_SOURCE until next frame's UAV transition
+
+    // Transition BackBuffer to RENDER_TARGET for UI Rendering
+	d3dResourceBarrier.Transition.pResource = m_ppd3dSwapChainBackBuffers[m_nSwapChainBufferIndex];
+	d3dResourceBarrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+	d3dResourceBarrier.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
+	m_pd3dCommandList->ResourceBarrier(1, &d3dResourceBarrier);
+
+    //=============================================================================================
+    // 4. Render UI to Back Buffer
+    //=============================================================================================
+	D3D12_CPU_DESCRIPTOR_HANDLE d3dRtvCPUDescriptorHandle = m_pd3dRtvDescriptorHeap->GetCPUDescriptorHandleForHeapStart();
+	d3dRtvCPUDescriptorHandle.ptr += (m_nSwapChainBufferIndex * gnRtvDescriptorIncrementSize);
+
+	m_pd3dCommandList->OMSetRenderTargets(1, &d3dRtvCPUDescriptorHandle, TRUE, &d3dDsvCPUDescriptorHandle);
+
+    if (m_GameState == GameState::InGame && m_pScene)
+    {
+        // Force update UI logic without rendering scene again
+        m_pScene->UpdateUIButtons(m_GameTimer.GetTimeElapsed()); // Actually this just updates main menu buttons?
+        // We need separate UI render call. 
+        // Currently CScene::Render handles everything.
+        // Let's assume UI was already drawn in Step 1 for now (blurred together).
+        // If we want sharp UI, we need to extract UI rendering from CScene::Render or call it here.
+        // CScene::Render does: UpdatePlayerSpeedUI() -> Render UI Meshes.
+        // We can call a specialized UI render function if we refactor.
+        // For simplicity, UI is blurred for now.
+    }
+
+    // Transition BackBuffer to PRESENT
+	d3dResourceBarrier.Transition.pResource = m_ppd3dSwapChainBackBuffers[m_nSwapChainBufferIndex];
 	d3dResourceBarrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
 	d3dResourceBarrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
-	d3dResourceBarrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
 	m_pd3dCommandList->ResourceBarrier(1, &d3dResourceBarrier);
 
 	hResult = m_pd3dCommandList->Close();

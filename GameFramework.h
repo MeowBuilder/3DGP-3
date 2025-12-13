@@ -75,6 +75,22 @@ private:
 	ID3D12Resource				*m_pd3dDepthStencilBuffer = NULL;
 	ID3D12DescriptorHeap		*m_pd3dDsvDescriptorHeap = NULL;
 
+	// Motion Blur Resources
+	ID3D12Resource				*m_pSceneTexture = NULL; // Off-screen Render Target
+	ID3D12Resource				*m_pBlurTexture = NULL;  // Compute Shader Output
+	ID3D12DescriptorHeap		*m_pd3dCbvSrvUavDescriptorHeap = NULL;
+
+    class CMotionBlurShader     *m_pMotionBlurShader = NULL; // Motion Blur Shader
+
+	D3D12_CPU_DESCRIPTOR_HANDLE m_d3dSceneTextureRtvCPUHandle;
+	D3D12_GPU_DESCRIPTOR_HANDLE m_d3dSceneTextureSrvGPUHandle;
+	D3D12_GPU_DESCRIPTOR_HANDLE m_d3dBlurTextureUavGPUHandle;
+    D3D12_GPU_DESCRIPTOR_HANDLE m_d3dBlurTextureSrvGPUHandle;
+
+	void CreateSceneTexture();
+	void CreateBlurTexture();
+	void CreateCbvSrvUavDescriptorHeap();
+
 	ID3D12CommandAllocator		*m_pd3dCommandAllocator = NULL;
 	ID3D12CommandQueue			*m_pd3dCommandQueue = NULL;
 	ID3D12GraphicsCommandList	*m_pd3dCommandList = NULL;

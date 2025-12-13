@@ -79,7 +79,10 @@ public:
 	CMotionBlurShader();
 	virtual ~CMotionBlurShader();
 
+    ID3D12RootSignature* m_pd3dComputeRootSignature = NULL;
+
 	virtual D3D12_SHADER_BYTECODE CreateComputeShader();
+    ID3D12RootSignature* CreateComputeRootSignature(ID3D12Device* pd3dDevice);
 	virtual void CreateShader(ID3D12Device* pd3dDevice, ID3D12GraphicsCommandList* pd3dCommandList, ID3D12RootSignature* pd3dRootSignature);
 	
 	void Dispatch(ID3D12GraphicsCommandList* pd3dCommandList, int nWidth, int nHeight, int nDepth);

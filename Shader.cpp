@@ -986,6 +986,7 @@ CMotionBlurShader::CMotionBlurShader()
 CMotionBlurShader::~CMotionBlurShader()
 {
 	if (m_pd3dComputeShaderBlob) m_pd3dComputeShaderBlob->Release();
+    if (m_pd3dComputeRootSignature) m_pd3dComputeRootSignature->Release();
 }
 
 D3D12_SHADER_BYTECODE CMotionBlurShader::CreateComputeShader()
@@ -993,23 +994,105 @@ D3D12_SHADER_BYTECODE CMotionBlurShader::CreateComputeShader()
 	return(CShader::CompileShaderFromFile(L"Shaders.hlsl", "CSMotionBlur", "cs_5_1", &m_pd3dComputeShaderBlob));
 }
 
+ID3D12RootSignature* CMotionBlurShader::CreateComputeRootSignature(ID3D12Device* pd3dDevice)
+{
+    // Root Parameters:
+    // 0: Output UAV (RWTexture2D) - u0
+    // 1: Input SRV (Texture2D) - t0
+    // 2: Constants (CBV) - b4
+
+    D3D12_DESCRIPTOR_RANGE pd3dDescriptorRanges[2];
+
+    // Range 0: UAV (u0)
+    pd3dDescriptorRanges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+    pd3dDescriptorRanges[0].NumDescriptors = 1;
+    pd3dDescriptorRanges[0].BaseShaderRegister = 0; // u0
+    pd3dDescriptorRanges[0].RegisterSpace = 0;
+    pd3dDescriptorRanges[0].OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+
+    // Range 1: SRV (t0)
+    pd3dDescriptorRanges[1].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    pd3dDescriptorRanges[1].NumDescriptors = 1;
+    pd3dDescriptorRanges[1].BaseShaderRegister = 0; // t0
+    pd3dDescriptorRanges[1].RegisterSpace = 0;
+    pd3dDescriptorRanges[1].OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+
+    D3D12_ROOT_PARAMETER pd3dRootParameters[3];
+
+    // Parameter 0: Descriptor Table for UAV (u0)
+    pd3dRootParameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    pd3dRootParameters[0].DescriptorTable.NumDescriptorRanges = 1;
+    pd3dRootParameters[0].DescriptorTable.pDescriptorRanges = &pd3dDescriptorRanges[0];
+    pd3dRootParameters[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+
+    // Parameter 1: Descriptor Table for SRV (t0)
+    pd3dRootParameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    pd3dRootParameters[1].DescriptorTable.NumDescriptorRanges = 1;
+    pd3dRootParameters[1].DescriptorTable.pDescriptorRanges = &pd3dDescriptorRanges[1];
+    pd3dRootParameters[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+
+    // Parameter 2: Root Constants for Blur Info (b4)
+    // int nWidth, int nHeight, float fBlurStrength, int nDirection (4 values)
+    pd3dRootParameters[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    pd3dRootParameters[2].Constants.Num32BitValues = 4;
+    pd3dRootParameters[2].Constants.ShaderRegister = 4; // b4
+    pd3dRootParameters[2].Constants.RegisterSpace = 0;
+    pd3dRootParameters[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+
+	D3D12_ROOT_SIGNATURE_FLAGS d3dRootSignatureFlags = D3D12_ROOT_SIGNATURE_FLAG_NONE; // CS doesn't use Input Assembler
+	D3D12_ROOT_SIGNATURE_DESC d3dRootSignatureDesc;
+	::ZeroMemory(&d3dRootSignatureDesc, sizeof(D3D12_ROOT_SIGNATURE_DESC));
+	d3dRootSignatureDesc.NumParameters = _countof(pd3dRootParameters);
+	d3dRootSignatureDesc.pParameters = pd3dRootParameters;
+	d3dRootSignatureDesc.NumStaticSamplers = 0;
+	d3dRootSignatureDesc.pStaticSamplers = NULL;
+	d3dRootSignatureDesc.Flags = d3dRootSignatureFlags;
+
+	ID3DBlob *pd3dSignatureBlob = NULL;
+	ID3DBlob *pd3dErrorBlob = NULL;
+	D3D12SerializeRootSignature(&d3dRootSignatureDesc, D3D_ROOT_SIGNATURE_VERSION_1, &pd3dSignatureBlob, &pd3dErrorBlob);
+	pd3dDevice->CreateRootSignature(0, pd3dSignatureBlob->GetBufferPointer(), pd3dSignatureBlob->GetBufferSize(), __uuidof(ID3D12RootSignature), (void **)&m_pd3dComputeRootSignature);
+	if (pd3dSignatureBlob) pd3dSignatureBlob->Release();
+	if (pd3dErrorBlob) pd3dErrorBlob->Release();
+
+    return m_pd3dComputeRootSignature;
+}
+
 void CMotionBlurShader::CreateShader(ID3D12Device* pd3dDevice, ID3D12GraphicsCommandList* pd3dCommandList, ID3D12RootSignature* pd3dRootSignature)
 {
+    if (!m_pd3dComputeRootSignature) CreateComputeRootSignature(pd3dDevice);
+
+    D3D12_SHADER_BYTECODE d3dComputeShaderByteCode = CreateComputeShader();
+
+    if (!d3dComputeShaderByteCode.pShaderBytecode)
+    {
+        ::MessageBox(NULL, L"CMotionBlurShader::CreateShader() - FAILED to compile Compute Shader!", L"Error", MB_OK);
+        return;
+    }
+
 	m_nPipelineStates = 1;
 	m_ppd3dPipelineStates = new ID3D12PipelineState * [m_nPipelineStates];
+    m_ppd3dPipelineStates[0] = NULL; // Initialize to NULL
 
 	D3D12_COMPUTE_PIPELINE_STATE_DESC d3dPipelineStateDesc;
 	::ZeroMemory(&d3dPipelineStateDesc, sizeof(D3D12_COMPUTE_PIPELINE_STATE_DESC));
-	d3dPipelineStateDesc.pRootSignature = pd3dRootSignature;
-	d3dPipelineStateDesc.CS = CreateComputeShader();
+	d3dPipelineStateDesc.pRootSignature = m_pd3dComputeRootSignature;
+	d3dPipelineStateDesc.CS = d3dComputeShaderByteCode;
 	d3dPipelineStateDesc.NodeMask = 0;
 	d3dPipelineStateDesc.Flags = D3D12_PIPELINE_STATE_FLAG_NONE;
 
 	HRESULT hResult = pd3dDevice->CreateComputePipelineState(&d3dPipelineStateDesc, __uuidof(ID3D12PipelineState), (void**)&m_ppd3dPipelineStates[0]);
+    
+    if (FAILED(hResult))
+    {
+        ::MessageBox(NULL, L"CMotionBlurShader::CreateShader() - FAILED to create Compute Pipeline State!", L"Error", MB_OK);
+        m_ppd3dPipelineStates[0] = NULL;
+    }
 }
 
 void CMotionBlurShader::Dispatch(ID3D12GraphicsCommandList* pd3dCommandList, int nWidth, int nHeight, int nDepth)
 {
+    // Root Signature is set externally by caller (FrameAdvance) to allow parameter binding before dispatch
 	pd3dCommandList->SetPipelineState(m_ppd3dPipelineStates[0]);
 	pd3dCommandList->Dispatch(nWidth, nHeight, nDepth);
 }
