@@ -1,4 +1,4 @@
-﻿//-----------------------------------------------------------------------------
+//-----------------------------------------------------------------------------
 // File: Scene.h
 //-----------------------------------------------------------------------------
 
@@ -13,9 +13,8 @@
 #include "ScreenQuadMesh.h" // Added for Screen Quad Mesh (for background)
 #include "UIShader.h" // Added for UI Shader
 #include "WaterObject.h" // Added for CWaterObject
+#include "ShadowShader.h" // Added for Shadow Mapping
 #include <vector>
-
-
 
 struct VS_CB_WATER_ANIMATION
 {
@@ -23,6 +22,8 @@ struct VS_CB_WATER_ANIMATION
 };
 
 #define MAX_LIGHTS			16 
+#define SHADOW_MAP_WIDTH	4096 
+#define SHADOW_MAP_HEIGHT	4096
 
 #define POINT_LIGHT			1
 #define SPOT_LIGHT			2
@@ -50,6 +51,20 @@ struct LIGHTS
 	LIGHT					m_pLights[MAX_LIGHTS];
 	XMFLOAT4				m_xmf4GlobalAmbient;
 	int						m_nLights;
+};
+
+struct SHADOW_INFO
+{
+    XMFLOAT4X4              m_xmf4x4ShadowTransform; // World -> Light Clip space -> Texture space
+    float                   m_fShadowBias;
+	XMFLOAT3				padding;
+};
+
+struct TERRAIN_TESSELLATION_INFO
+{
+	XMFLOAT4				m_xmf4TessellationFactor;
+	float					m_fTerrainHeightScale;
+	XMFLOAT3				m_xmf3Padding;
 };
 
 class CDescriptorHeap
@@ -109,6 +124,10 @@ public:
 	bool ProcessInput(UCHAR *pKeysBuffer);
     void AnimateObjects(float fTimeElapsed);
     void Render(ID3D12GraphicsCommandList *pd3dCommandList, CCamera *pCamera=NULL);
+
+    // Shadow Mapping Functions
+	void RenderShadowMap(ID3D12GraphicsCommandList *pd3dCommandList, CCamera *pCamera);
+	ID3D12Resource* GetShadowMap() { return m_pd3dShadowMap; }
 
 	void ReleaseUploadBuffers();
 
@@ -198,8 +217,26 @@ protected:
 	ID3D12Resource						*m_pd3dcbLights = NULL;
 	LIGHTS								*m_pcbMappedLights = NULL;
 
+	ID3D12Resource						*m_pd3dcbTerrainTessellation = NULL;
+	TERRAIN_TESSELLATION_INFO			*m_pcbMappedTerrainTessellation = NULL;
+
 	ID3D12Resource*						m_pd3dcbWaterAnimation = NULL;
 	VS_CB_WATER_ANIMATION*				m_pcbMappedWaterAnimation = NULL;
+
+    // Shadow Map Resources
+	ID3D12Resource*             m_pd3dShadowMap = nullptr;
+	ID3D12DescriptorHeap*       m_pd3dShadowDsvHeap = nullptr;
+	D3D12_CPU_DESCRIPTOR_HANDLE m_d3dShadowDsvCpuHandle;
+	D3D12_GPU_DESCRIPTOR_HANDLE m_d3dShadowSrvGpuHandle; 
+
+	D3D12_VIEWPORT              m_d3dShadowViewport;
+	D3D12_RECT                  m_d3dShadowScissorRect;
+    
+	CCamera*                    m_pLightCamera = nullptr;
+
+    // Shadow Info Constant Buffer
+	ID3D12Resource						*m_pd3dcbShadowInfo = NULL;
+	SHADOW_INFO							*m_pcbMappedShadowInfo = NULL;
 
 public:
 	CMirrorShader* m_pMirrorShader = NULL;

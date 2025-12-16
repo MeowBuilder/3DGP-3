@@ -244,6 +244,8 @@ public:
 	virtual void Render(ID3D12GraphicsCommandList* pd3dCommandList, CCamera* pCamera, const XMMATRIX& xmmtxReflection);
 	virtual void Render(ID3D12GraphicsCommandList* pd3dCommandList, CCamera* pCamera, const XMMATRIX& xmmtxReflection, int nPipelineState);
 
+	virtual void RenderShadow(ID3D12GraphicsCommandList* pd3dCommandList);
+
 	virtual void RenderAABB(ID3D12GraphicsCommandList* pd3dCommandList, CCamera* pCamera, CMesh* pAABBMesh, CMaterial* pAABBMaterial);
 
 	virtual void CreateShaderVariables(ID3D12Device *pd3dDevice, ID3D12GraphicsCommandList *pd3dCommandList);

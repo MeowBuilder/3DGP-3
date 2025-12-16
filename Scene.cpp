@@ -1,18 +1,20 @@
-﻿//-----------------------------------------------------------------------------
+//-----------------------------------------------------------------------------
 // File: CScene.cpp
 //-----------------------------------------------------------------------------
 
 #include "stdafx.h"
 #include "Scene.h"
-#include "GameFramework.h" // Added for GameFramework access
-#include "UIRectMesh.h" // Added for UI Rect Mesh
-#include "ScreenQuadMesh.h" // Added for Screen Quad Mesh
-#include "UIShader.h" // Added for UI Shader
+#include "GameFramework.h"
+#include "UIRectMesh.h"
+#include "ScreenQuadMesh.h"
+#include "UIShader.h"
 #include "Object.h"
-#include "WaterObject.h" // Added for CWaterObject
-#include "WaterShader.h" // Added for CWaterShader
+#include "WaterObject.h"
+#include "WaterShader.h"
 #include "MirrorShader.h"
 #include "Mesh.h"
+#include "ShadowShader.h"
+#include "d3dx12.h"
 
 CDescriptorHeap* CScene::m_pDescriptorHeap = NULL;
 
@@ -143,6 +145,12 @@ CScene::CScene(CGameFramework* pGameFramework)
 {
 	m_pGameFramework = pGameFramework;
 	m_xmf4x4WaterAnimation = XMFLOAT4X4(1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f);
+	// Shadow map members initialization
+	m_pd3dShadowMap = nullptr;
+	m_pd3dShadowDsvHeap = nullptr;
+	m_d3dShadowDsvCpuHandle = { 0 };
+	m_d3dShadowSrvGpuHandle = { 0 };
+	m_pLightCamera = nullptr;
 }
 
 CScene::~CScene()
@@ -182,9 +190,12 @@ void CScene::BuildDefaultLightsAndMaterials()
 	m_pLights[2].m_bEnable = true;
 	m_pLights[2].m_nType = DIRECTIONAL_LIGHT;
 	m_pLights[2].m_xmf4Ambient = XMFLOAT4(0.3f, 0.3f, 0.3f, 1.0f);
-	m_pLights[2].m_xmf4Diffuse = XMFLOAT4(0.7f, 0.7f, 0.7f, 1.0f);
+	m_pLights[2].m_xmf4Diffuse = XMFLOAT4(0.9f, 0.8f, 0.6f, 1.0f); 
 	m_pLights[2].m_xmf4Specular = XMFLOAT4(0.4f, 0.4f, 0.4f, 0.0f);
-	m_pLights[2].m_xmf3Direction = XMFLOAT3(1.0f, 0.0f, 0.0f);
+	XMFLOAT3 dir = XMFLOAT3(1.0f, -0.8f, 0.0f); // Same as Sample project
+	XMVECTOR vDir = XMLoadFloat3(&dir);
+	vDir = XMVector3Normalize(vDir);
+	XMStoreFloat3(&m_pLights[2].m_xmf3Direction, vDir);
 	m_pLights[3].m_bEnable = true;
 	m_pLights[3].m_nType = SPOT_LIGHT;
 	m_pLights[3].m_fRange = 600.0f;
@@ -204,11 +215,98 @@ void CScene::BuildObjects(ID3D12Device *pd3dDevice, ID3D12GraphicsCommandList *p
 	m_pd3dGraphicsRootSignature = CreateGraphicsRootSignature(pd3dDevice);
 
 	m_pDescriptorHeap = new CDescriptorHeap();
-	CreateCbvSrvDescriptorHeaps(pd3dDevice, 0, 505);
+	CreateCbvSrvDescriptorHeaps(pd3dDevice, 0, 507); // Increased for Shadow Map (505 -> 507)
+
+	// 1. Light Camera Creation
+	m_pLightCamera = new CCamera();
+	m_pLightCamera->CreateShaderVariables(pd3dDevice, pd3dCommandList);
+	XMFLOAT4X4 xmf4x4Projection;
+	float shadowMapWidth = 8000.0f; 
+	float shadowMapHeight = 8000.0f;
+	float shadowNearZ = 1.0f;
+	float shadowFarZ = 5000.0f;
+	XMStoreFloat4x4(&xmf4x4Projection, XMMatrixOrthographicOffCenterLH(-shadowMapWidth / 2.0f, shadowMapWidth / 2.0f, -shadowMapHeight / 2.0f, shadowMapHeight / 2.0f, shadowNearZ, shadowFarZ));
+	m_pLightCamera->SetProjectionMatrix(xmf4x4Projection);
+
+	// 2. Create Shadow Map Texture
+	D3D12_RESOURCE_DESC d3dResourceDesc;
+	::ZeroMemory(&d3dResourceDesc, sizeof(D3D12_RESOURCE_DESC));
+	d3dResourceDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+	d3dResourceDesc.Alignment = 0;
+	d3dResourceDesc.Width = SHADOW_MAP_WIDTH;
+	d3dResourceDesc.Height = SHADOW_MAP_HEIGHT;
+	d3dResourceDesc.DepthOrArraySize = 1;
+	d3dResourceDesc.MipLevels = 1;
+	d3dResourceDesc.Format = DXGI_FORMAT_R32_TYPELESS; 
+	d3dResourceDesc.SampleDesc.Count = 1;
+	d3dResourceDesc.SampleDesc.Quality = 0;
+	d3dResourceDesc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+	d3dResourceDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+
+	D3D12_CLEAR_VALUE d3dClearValue;
+	d3dClearValue.Format = DXGI_FORMAT_D32_FLOAT;
+	d3dClearValue.DepthStencil.Depth = 1.0f;
+	d3dClearValue.DepthStencil.Stencil = 0;
+
+	D3D12_HEAP_PROPERTIES d3dHeapProperties = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT);
+	pd3dDevice->CreateCommittedResource(
+		&d3dHeapProperties,
+		D3D12_HEAP_FLAG_NONE,
+		&d3dResourceDesc,
+		D3D12_RESOURCE_STATE_GENERIC_READ, 
+		&d3dClearValue,
+		__uuidof(ID3D12Resource),
+		(void**)&m_pd3dShadowMap
+	);
+
+	// 3. Create Shadow Map DSV Heap
+	D3D12_DESCRIPTOR_HEAP_DESC d3dDsvHeapDesc;
+	d3dDsvHeapDesc.NumDescriptors = 1;
+	d3dDsvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
+	d3dDsvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
+	d3dDsvHeapDesc.NodeMask = 0;
+	pd3dDevice->CreateDescriptorHeap(&d3dDsvHeapDesc, __uuidof(ID3D12DescriptorHeap), (void**)&m_pd3dShadowDsvHeap);
+
+	D3D12_DEPTH_STENCIL_VIEW_DESC d3dDsvDesc;
+	::ZeroMemory(&d3dDsvDesc, sizeof(D3D12_DEPTH_STENCIL_VIEW_DESC));
+	d3dDsvDesc.Format = DXGI_FORMAT_D32_FLOAT;
+	d3dDsvDesc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
+	d3dDsvDesc.Flags = D3D12_DSV_FLAG_NONE;
+	
+	m_d3dShadowDsvCpuHandle = m_pd3dShadowDsvHeap->GetCPUDescriptorHandleForHeapStart();
+	pd3dDevice->CreateDepthStencilView(m_pd3dShadowMap, &d3dDsvDesc, m_d3dShadowDsvCpuHandle);
+
+	// 4. Create Shadow Map SRV
+	D3D12_SHADER_RESOURCE_VIEW_DESC d3dSrvDesc;
+	::ZeroMemory(&d3dSrvDesc, sizeof(D3D12_SHADER_RESOURCE_VIEW_DESC));
+	d3dSrvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+	d3dSrvDesc.Format = DXGI_FORMAT_R32_FLOAT;
+	d3dSrvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+	d3dSrvDesc.Texture2D.MipLevels = 1;
+	d3dSrvDesc.Texture2D.MostDetailedMip = 0;
+	d3dSrvDesc.Texture2D.ResourceMinLODClamp = 0.0f;
+
+	m_d3dShadowSrvGpuHandle = m_pDescriptorHeap->m_d3dSrvGPUDescriptorNextHandle;
+	pd3dDevice->CreateShaderResourceView(m_pd3dShadowMap, &d3dSrvDesc, m_pDescriptorHeap->m_d3dSrvCPUDescriptorNextHandle);
+	m_pDescriptorHeap->m_d3dSrvCPUDescriptorNextHandle.ptr += ::gnCbvSrvDescriptorIncrementSize;
+	m_pDescriptorHeap->m_d3dSrvGPUDescriptorNextHandle.ptr += ::gnCbvSrvDescriptorIncrementSize;
+
+	// 5. Setup Viewport/Scissor
+	m_d3dShadowViewport.Width = (float)SHADOW_MAP_WIDTH;
+	m_d3dShadowViewport.Height = (float)SHADOW_MAP_HEIGHT;
+	m_d3dShadowViewport.MinDepth = 0.0f;
+	m_d3dShadowViewport.MaxDepth = 1.0f;
+	m_d3dShadowViewport.TopLeftX = 0;
+	m_d3dShadowViewport.TopLeftY = 0;
+
+	m_d3dShadowScissorRect.left = 0;
+	m_d3dShadowScissorRect.top = 0;
+	m_d3dShadowScissorRect.right = SHADOW_MAP_WIDTH;
+	m_d3dShadowScissorRect.bottom = SHADOW_MAP_HEIGHT;
 
 	BuildDefaultLightsAndMaterials();
 
-	m_nShaders = 5;
+	m_nShaders = 6; // Increased to 6 for ShadowShader
 	m_ppShaders = new CShader * [m_nShaders];
 
 	m_pSkyBox = new CSkyBox(pd3dDevice, pd3dCommandList, m_pd3dGraphicsRootSignature);
@@ -222,6 +320,12 @@ void CScene::BuildObjects(ID3D12Device *pd3dDevice, ID3D12GraphicsCommandList *p
 	pObjectsShader->CreateShader(pd3dDevice, pd3dCommandList, m_pd3dGraphicsRootSignature);
 	pObjectsShader->BuildObjects(pd3dDevice, pd3dCommandList, m_pd3dGraphicsRootSignature, m_pTerrain);
 	m_ppShaders[0] = pObjectsShader;
+
+	// Add CShadowShader
+    CShadowShader* pShadowShader = new CShadowShader();
+    pShadowShader->AddRef();
+    pShadowShader->CreateShader(pd3dDevice, pd3dCommandList, m_pd3dGraphicsRootSignature);
+    m_ppShaders[5] = pShadowShader; // Index 5 for ShadowShader
 
 	m_pPlayer = new CTerrainPlayer(pd3dDevice, pd3dCommandList, m_pd3dGraphicsRootSignature, m_pTerrain);
 	m_pPlayer->SetPosition(XMFLOAT3(250, 670, 1750));
@@ -433,6 +537,10 @@ void CScene::BuildObjects(ID3D12Device *pd3dDevice, ID3D12GraphicsCommandList *p
 	pMirrorMaterial->SetShader(m_pMirrorShader);
 
 	CreateShaderVariables(pd3dDevice, pd3dCommandList);
+
+	XMFLOAT3 xmf3Scaletess = XMFLOAT3(18.0f, 6.0f, 18.0f);
+	m_pcbMappedTerrainTessellation->m_xmf4TessellationFactor = XMFLOAT4(4.0f, 32.0f, 20.0f, 200.0f);
+	m_pcbMappedTerrainTessellation->m_fTerrainHeightScale = xmf3Scaletess.y;
 }
 
 void CScene::ReleaseObjects()
@@ -505,13 +613,18 @@ void CScene::ReleaseObjects()
 	if (m_pLights) delete[] m_pLights;
 
 	if (m_pDescriptorHeap) delete m_pDescriptorHeap;
+
+	// Shadow Map Resource Releases
+    if (m_pLightCamera) delete m_pLightCamera;
+    if (m_pd3dShadowMap) m_pd3dShadowMap->Release();
+    if (m_pd3dShadowDsvHeap) m_pd3dShadowDsvHeap->Release();
 }
 
 ID3D12RootSignature *CScene::CreateGraphicsRootSignature(ID3D12Device *pd3dDevice)
 {
 	ID3D12RootSignature *pd3dGraphicsRootSignature = NULL;
 
-	D3D12_DESCRIPTOR_RANGE pd3dDescriptorRanges[14];
+	D3D12_DESCRIPTOR_RANGE pd3dDescriptorRanges[15]; // Increased to 15
 
 	pd3dDescriptorRanges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
 	pd3dDescriptorRanges[0].NumDescriptors = 1;
@@ -585,7 +698,14 @@ ID3D12RootSignature *CScene::CreateGraphicsRootSignature(ID3D12Device *pd3dDevic
 	pd3dDescriptorRanges[11].RegisterSpace = 0;
 	pd3dDescriptorRanges[11].OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
 
-	D3D12_ROOT_PARAMETER pd3dRootParameters[16];
+	// New: Shadow Map SRV (t31)
+	pd3dDescriptorRanges[12].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+	pd3dDescriptorRanges[12].NumDescriptors = 1; 
+	pd3dDescriptorRanges[12].BaseShaderRegister = 31; 
+	pd3dDescriptorRanges[12].RegisterSpace = 0;
+	pd3dDescriptorRanges[12].OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+
+	D3D12_ROOT_PARAMETER pd3dRootParameters[19]; // Increased to 19
 
 	pd3dRootParameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
 	pd3dRootParameters[0].Descriptor.ShaderRegister = 1; //Camera
@@ -631,7 +751,7 @@ ID3D12RootSignature *CScene::CreateGraphicsRootSignature(ID3D12Device *pd3dDevic
 	pd3dRootParameters[8].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
 	pd3dRootParameters[8].DescriptorTable.NumDescriptorRanges = 1;
 	pd3dRootParameters[8].DescriptorTable.pDescriptorRanges = &(pd3dDescriptorRanges[5]);
-	pd3dRootParameters[8].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+	pd3dRootParameters[8].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
 	pd3dRootParameters[9].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
 	pd3dRootParameters[9].DescriptorTable.NumDescriptorRanges = 1;
@@ -646,7 +766,7 @@ ID3D12RootSignature *CScene::CreateGraphicsRootSignature(ID3D12Device *pd3dDevic
 	pd3dRootParameters[11].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
 	pd3dRootParameters[11].DescriptorTable.NumDescriptorRanges = 1;
 	pd3dRootParameters[11].DescriptorTable.pDescriptorRanges = &(pd3dDescriptorRanges[8]);
-	pd3dRootParameters[11].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL; // Changed from PIXEL to ALL for Tessellation (DS)
+	pd3dRootParameters[11].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
 	pd3dRootParameters[12].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
 	pd3dRootParameters[12].DescriptorTable.NumDescriptorRanges = 1;
@@ -668,7 +788,25 @@ ID3D12RootSignature *CScene::CreateGraphicsRootSignature(ID3D12Device *pd3dDevic
 	pd3dRootParameters[15].DescriptorTable.pDescriptorRanges = &(pd3dDescriptorRanges[11]);
 	pd3dRootParameters[15].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
-	D3D12_STATIC_SAMPLER_DESC pd3dSamplerDescs[2];
+	// New: Tessellation CBV (b8)
+	pd3dRootParameters[16].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+	pd3dRootParameters[16].Descriptor.ShaderRegister = 8; 
+	pd3dRootParameters[16].Descriptor.RegisterSpace = 0;
+	pd3dRootParameters[16].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+
+	// New: Shadow Map SRV Table (t31)
+	pd3dRootParameters[17].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+	pd3dRootParameters[17].DescriptorTable.NumDescriptorRanges = 1;
+	pd3dRootParameters[17].DescriptorTable.pDescriptorRanges = &(pd3dDescriptorRanges[12]);
+	pd3dRootParameters[17].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
+	// New: Shadow Info CBV (b9)
+	pd3dRootParameters[18].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+	pd3dRootParameters[18].Descriptor.ShaderRegister = 9; 
+	pd3dRootParameters[18].Descriptor.RegisterSpace = 0;
+	pd3dRootParameters[18].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+
+	D3D12_STATIC_SAMPLER_DESC pd3dSamplerDescs[3]; // Increased to 3
 
 	pd3dSamplerDescs[0].Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
 	pd3dSamplerDescs[0].AddressU = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
@@ -681,7 +819,7 @@ ID3D12RootSignature *CScene::CreateGraphicsRootSignature(ID3D12Device *pd3dDevic
 	pd3dSamplerDescs[0].MaxLOD = D3D12_FLOAT32_MAX;
 	pd3dSamplerDescs[0].ShaderRegister = 0;
 	pd3dSamplerDescs[0].RegisterSpace = 0;
-	pd3dSamplerDescs[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL; // Changed to ALL
+	pd3dSamplerDescs[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
 	pd3dSamplerDescs[1].Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
 	pd3dSamplerDescs[1].AddressU = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
@@ -694,7 +832,22 @@ ID3D12RootSignature *CScene::CreateGraphicsRootSignature(ID3D12Device *pd3dDevic
 	pd3dSamplerDescs[1].MaxLOD = D3D12_FLOAT32_MAX;
 	pd3dSamplerDescs[1].ShaderRegister = 1;
 	pd3dSamplerDescs[1].RegisterSpace = 0;
-	pd3dSamplerDescs[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL; // Changed to ALL
+	pd3dSamplerDescs[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+
+	// New: Shadow Comparison Sampler (s2)
+	pd3dSamplerDescs[2].Filter = D3D12_FILTER_COMPARISON_MIN_MAG_LINEAR_MIP_POINT;
+	pd3dSamplerDescs[2].AddressU = D3D12_TEXTURE_ADDRESS_MODE_BORDER;
+	pd3dSamplerDescs[2].AddressV = D3D12_TEXTURE_ADDRESS_MODE_BORDER;
+	pd3dSamplerDescs[2].AddressW = D3D12_TEXTURE_ADDRESS_MODE_BORDER;
+	pd3dSamplerDescs[2].MipLODBias = 0;
+	pd3dSamplerDescs[2].MaxAnisotropy = 1;
+	pd3dSamplerDescs[2].ComparisonFunc = D3D12_COMPARISON_FUNC_LESS_EQUAL;
+	pd3dSamplerDescs[2].BorderColor = D3D12_STATIC_BORDER_COLOR_OPAQUE_WHITE;
+	pd3dSamplerDescs[2].MinLOD = 0;
+	pd3dSamplerDescs[2].MaxLOD = D3D12_FLOAT32_MAX;
+	pd3dSamplerDescs[2].ShaderRegister = 2;
+	pd3dSamplerDescs[2].RegisterSpace = 0;
+	pd3dSamplerDescs[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
 	D3D12_ROOT_SIGNATURE_FLAGS d3dRootSignatureFlags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
 	D3D12_ROOT_SIGNATURE_DESC d3dRootSignatureDesc;
@@ -735,6 +888,16 @@ void CScene::CreateShaderVariables(ID3D12Device *pd3dDevice, ID3D12GraphicsComma
 	m_pd3dcbWaterAnimation = ::CreateBufferResource(pd3dDevice, pd3dCommandList, NULL, ncbElementBytes, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER, NULL);
 
 	m_pd3dcbWaterAnimation->Map(0, NULL, (void **)&m_pcbMappedWaterAnimation);
+
+	ncbElementBytes = ((sizeof(TERRAIN_TESSELLATION_INFO) + 255) & ~255); //256
+	m_pd3dcbTerrainTessellation = ::CreateBufferResource(pd3dDevice, pd3dCommandList, NULL, ncbElementBytes, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER, NULL);
+
+	m_pd3dcbTerrainTessellation->Map(0, NULL, (void**)&m_pcbMappedTerrainTessellation);
+
+    // Create and map Shadow Info constant buffer
+    ncbElementBytes = ((sizeof(SHADOW_INFO) + 255) & ~255); //256
+    m_pd3dcbShadowInfo = ::CreateBufferResource(pd3dDevice, pd3dCommandList, NULL, ncbElementBytes, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER, NULL);
+    m_pd3dcbShadowInfo->Map(0, NULL, (void**)&m_pcbMappedShadowInfo);
 }
 
 void CScene::UpdateShaderVariables(ID3D12GraphicsCommandList *pd3dCommandList)
@@ -745,6 +908,26 @@ void CScene::UpdateShaderVariables(ID3D12GraphicsCommandList *pd3dCommandList)
 
 	XMStoreFloat4x4(&m_pcbMappedWaterAnimation->m_xmf4x4TextureAnimation, XMMatrixTranspose(XMLoadFloat4x4(&m_xmf4x4WaterAnimation)));
 	pd3dCommandList->SetGraphicsRootConstantBufferView(14, m_pd3dcbWaterAnimation->GetGPUVirtualAddress());
+
+    // Update Shadow Info constant buffer
+    if (m_pcbMappedShadowInfo && m_pLightCamera && m_pPlayer && m_pLights[2].m_bEnable) // Check if directional light is enabled
+    {
+        XMMATRIX lightView = XMLoadFloat4x4(&m_pLightCamera->GetViewMatrix());
+        XMMATRIX lightProj = XMLoadFloat4x4(&m_pLightCamera->GetProjectionMatrix());
+        XMMATRIX lightVP = lightView * lightProj;
+
+        // Bias matrix to transform from NDC [-1,1] to texture space [0,1]
+        XMMATRIX texScaleBiasMatrix = XMMatrixSet(
+            0.5f,  0.0f,  0.0f,  0.0f,
+            0.0f, -0.5f,  0.0f,  0.0f, // Y-axis flip because DirectX texture coords are top-down
+            0.0f,  0.0f,  1.0f,  0.0f,
+            0.5f,  0.5f,  0.0f,  1.0f
+        );
+
+        XMStoreFloat4x4(&m_pcbMappedShadowInfo->m_xmf4x4ShadowTransform, XMMatrixTranspose(lightVP * texScaleBiasMatrix));
+        m_pcbMappedShadowInfo->m_fShadowBias = 0.005f; // Initial shadow bias, might need tuning
+    }
+    pd3dCommandList->SetGraphicsRootConstantBufferView(18, m_pd3dcbShadowInfo->GetGPUVirtualAddress()); // Root parameter 18 (b9)
 }
 
 void CScene::ReleaseShaderVariables()
@@ -760,6 +943,19 @@ void CScene::ReleaseShaderVariables()
 		m_pd3dcbWaterAnimation->Unmap(0, NULL);
 		m_pd3dcbWaterAnimation->Release();
 	}
+
+	if (m_pd3dcbTerrainTessellation)
+	{
+		m_pd3dcbTerrainTessellation->Unmap(0, NULL);
+		m_pd3dcbTerrainTessellation->Release();
+	}
+
+    // Release Shadow Info constant buffer
+    if (m_pd3dcbShadowInfo)
+    {
+        m_pd3dcbShadowInfo->Unmap(0, NULL);
+        m_pd3dcbShadowInfo->Release();
+    }
 
 	if (m_pTerrain) m_pTerrain->ReleaseShaderVariables();
 	if (m_pSkyBox) m_pSkyBox->ReleaseShaderVariables();
@@ -1039,9 +1235,10 @@ void CScene::Render(ID3D12GraphicsCommandList* pd3dCommandList, CCamera* pCamera
 			if (m_pExitButtonObject) m_pExitButtonObject->Render(pd3dCommandList, NULL);
 		}
 	}
-	else
-	{
-		pd3dCommandList->SetGraphicsRootSignature(m_pd3dGraphicsRootSignature);
+		else
+		{
+	        // 2. Main Render Pass
+		pd3dCommandList->SetGraphicsRootSignature(m_pd3dGraphicsRootSignature);		
 		ID3D12DescriptorHeap* ppHeaps[] = { m_pDescriptorHeap->m_pd3dCbvSrvDescriptorHeap };
 		pd3dCommandList->SetDescriptorHeaps(_countof(ppHeaps), ppHeaps);
 		pCamera->SetViewportsAndScissorRects(pd3dCommandList);
@@ -1049,6 +1246,21 @@ void CScene::Render(ID3D12GraphicsCommandList* pd3dCommandList, CCamera* pCamera
 		UpdateShaderVariables(pd3dCommandList);
 		D3D12_GPU_VIRTUAL_ADDRESS d3dcbLightsGpuVirtualAddress = m_pd3dcbLights->GetGPUVirtualAddress();
 		pd3dCommandList->SetGraphicsRootConstantBufferView(2, d3dcbLightsGpuVirtualAddress);
+
+        // Bind Tessellation CBV (b8)
+        pd3dCommandList->SetGraphicsRootConstantBufferView(16, m_pd3dcbTerrainTessellation->GetGPUVirtualAddress());
+
+        // Bind Shadow Map SRV (t31) - Index 17 in Root Sig
+        if (m_d3dShadowSrvGpuHandle.ptr)
+        {
+            pd3dCommandList->SetGraphicsRootDescriptorTable(17, m_d3dShadowSrvGpuHandle);
+        }
+
+        // Bind Shadow Info CBV (b9) - Index 18 in Root Sig
+        if (m_pd3dcbShadowInfo)
+        {
+            pd3dCommandList->SetGraphicsRootConstantBufferView(18, m_pd3dcbShadowInfo->GetGPUVirtualAddress());
+        }
 
 		if (m_pSkyBox) m_pSkyBox->Render(pd3dCommandList, pCamera);
 		if (m_pTerrain) 
@@ -1106,7 +1318,77 @@ void CScene::Render(ID3D12GraphicsCommandList* pd3dCommandList, CCamera* pCamera
 
 }
 
-		
+void CScene::RenderShadowMap(ID3D12GraphicsCommandList *pd3dCommandList, CCamera *pMainCamera)
+{
+    // 1. Viewport & Scissor
+    pd3dCommandList->RSSetViewports(1, &m_d3dShadowViewport);
+    pd3dCommandList->RSSetScissorRects(1, &m_d3dShadowScissorRect);
+
+    // 2. Clear DSV
+    pd3dCommandList->ClearDepthStencilView(m_d3dShadowDsvCpuHandle, D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL, 1.0f, 0, 0, NULL);
+
+    // 3. Set Render Target (Depth Only)
+    pd3dCommandList->OMSetRenderTargets(0, NULL, FALSE, &m_d3dShadowDsvCpuHandle);
+
+    // 4. Set Root Signature & Heaps
+    pd3dCommandList->SetGraphicsRootSignature(m_pd3dGraphicsRootSignature);
+    ID3D12DescriptorHeap* ppHeaps[] = { m_pDescriptorHeap->m_pd3dCbvSrvDescriptorHeap };
+	pd3dCommandList->SetDescriptorHeaps(_countof(ppHeaps), ppHeaps);
+
+    // 5. Update Light Camera
+    if (m_pLights && m_pLights[2].m_bEnable) // Directional Light
+    {
+        XMVECTOR lightDir = XMLoadFloat3(&m_pLights[2].m_xmf3Direction);
+        lightDir = XMVector3Normalize(lightDir);
+        XMFLOAT3 playerPos = m_pPlayer->GetPosition();
+        XMVECTOR lightPosition = XMLoadFloat3(&playerPos) - (lightDir * 500.0f); // 500 units away
+        XMVECTOR lookAt = XMLoadFloat3(&playerPos);
+        XMVECTOR up = XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f);
+        
+        // Ensure Up vector is not parallel to light direction
+        XMVECTOR cross = XMVector3Cross(lightDir, up);
+        if (XMVectorGetX(XMVector3LengthSq(cross)) < 0.001f)
+        {
+            up = XMVectorSet(0.0f, 0.0f, 1.0f, 0.0f);
+        }
+
+        XMFLOAT4X4 xmf4x4View;
+        XMStoreFloat4x4(&xmf4x4View, XMMatrixLookAtLH(lightPosition, lookAt, up));
+        m_pLightCamera->SetViewMatrix(xmf4x4View);
+    }
+    m_pLightCamera->UpdateShaderVariables(pd3dCommandList);
+
+    // 6. Render Objects (Shadow Shader)
+    CShadowShader* pShadowShader = dynamic_cast<CShadowShader*>(m_ppShaders[5]);
+    if (!pShadowShader) return;
+
+    pd3dCommandList->SetPipelineState(pShadowShader->GetPipelineState(0));
+
+    // Player
+    if (m_pPlayer) m_pPlayer->RenderShadow(pd3dCommandList);
+
+    // Building
+    if (m_pBuildingObject) m_pBuildingObject->RenderShadow(pd3dCommandList);
+
+    // Objects
+    CObjectsShader* pObjectsShader = dynamic_cast<CObjectsShader*>(m_ppShaders[0]);
+    if (pObjectsShader)
+    {
+        for (int i = 0; i < pObjectsShader->GetNumberOfObjects(); i++)
+        {
+            CGameObject *pObject = pObjectsShader->GetObject(i);
+            if (pObject && pObject->m_bRender)
+            {
+                pObject->Animate(0.0f, NULL); // Ensure transform is updated
+                pObject->RenderShadow(pd3dCommandList);
+            }
+        }
+    }
+    
+    // Note: Terrain shadow casting is skipped for now as it requires a specialized shader for Tessellation.
+}
+
+	
 
 void CScene::SpawnExplosion(const XMFLOAT3& position)
 

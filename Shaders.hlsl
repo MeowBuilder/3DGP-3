@@ -26,6 +26,23 @@ cbuffer cbWaterInfo : register(b3)
 	matrix		gf4x4TextureAnimation : packoffset(c0);
 };
 
+cbuffer cbTerrainTessellation : register(b8)
+{
+	float4 gvTessellationFactor; // x: MinTess, y: MaxTess, z: MinDist, w: MaxDist
+	float  gTerrainHeightScale;
+	float3 gvUnused;
+};
+
+// Shadow Map Resources
+Texture2D<float>          gShadowMap          : register(t31);
+SamplerComparisonState    gssShadow           : register(s2);
+
+cbuffer cbShadow          : register(b9)
+{
+    matrix                  gmtxShadowTransform; // World -> Light Clip space -> Texture space
+    float                   gShadowBias;
+};
+
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 // Water Shaders
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -69,6 +86,38 @@ Texture2D gtxtWaterDetail1Texture : register(t8);
 
 SamplerState gssWrap : register(s0);
 SamplerState gssClamp : register(s1);
+
+// Shadow calculation function
+float CalcPcfShadow(float4 positionW)
+{
+    float4 shadowPos = mul(positionW, gmtxShadowTransform);
+    shadowPos /= shadowPos.w;
+
+    // Point 1: Shadow Coordinate Range Check
+    if (shadowPos.x < 0.0f || shadowPos.x > 1.0f ||
+        shadowPos.y < 0.0f || shadowPos.y > 1.0f ||
+        shadowPos.z < 0.0f || shadowPos.z > 1.0f)
+    {
+        return 1.0f; // No shadow
+    }
+
+    // Point 3: Dynamic Texel Size Calculation
+	uint width, height;
+	gShadowMap.GetDimensions(width, height);
+	float2 texel = 1.0f / float2(width, height);
+    float  z     = shadowPos.z - gShadowBias;
+
+    float s = 0.0f;
+    [unroll] for(int y=-1; y<=1; y++)
+    {
+        [unroll] for(int x=-1; x<=1; x++)
+        {
+            s += gShadowMap.SampleCmpLevelZero(gssShadow, shadowPos.xy + float2(x,y)*texel, z);
+        }
+    }
+    return s / 9.0f;
+}
+
 VS_WATER_OUTPUT VSTerrainWater(VS_WATER_INPUT input)
 {
     VS_WATER_OUTPUT output;
@@ -166,14 +215,28 @@ float4 PSStandard(VS_STANDARD_OUTPUT input) : SV_TARGET
 
 	float4 cIllumination = float4(1.0f, 1.0f, 1.0f, 1.0f);
 	float4 cColor = cAlbedoColor + cSpecularColor + cEmissionColor;
+    
+    float3 normalW = normalize(input.normalW);
 	if (gnTexturesMask & MATERIAL_NORMAL_MAP)
     {
         float3x3 TBN = float3x3(input.tangentW, input.bitangentW, input.normalW);
         float3 vNormalTS = normalize(cNormalColor.rgb * 2.0f - 1.0f);
-        float3 normalW = normalize(mul(vNormalTS, TBN));
-        float4 cIllumination = Lighting(input.positionW, normalW);
-        cColor = lerp(cColor, cIllumination, 0.5f);
+        normalW = normalize(mul(vNormalTS, TBN));
     }
+
+    cIllumination = Lighting(input.positionW, normalW);
+    
+    // Calculate shadow factor
+    float shadowFactor = CalcPcfShadow(float4(input.positionW, 1.0f));
+    
+    // Apply shadow factor
+    float4 cFinalColor = cIllumination;
+    cFinalColor.rgb *= lerp(0.4f, 1.0f, shadowFactor); // Darken by 60% in shadow
+    
+    // Combine with albedo
+    cColor = cAlbedoColor * cFinalColor;
+	cColor.a = gMaterial.m_cDiffuse.a;
+    
     return cColor;
 }
 
@@ -279,34 +342,6 @@ float4 PSTextured(VS_SPRITE_TEXTURED_OUTPUT input) : SV_TARGET
 	return(cColor);
 }
 
-struct VS_TERRAIN_INPUT
-{
-	float3 position : POSITION;
-	float4 color : COLOR;
-	float2 uv0 : TEXCOORD0;
-	float2 uv1 : TEXCOORD1;
-};
-
-struct VS_TERRAIN_OUTPUT
-{
-	float4 position : SV_POSITION;
-	float4 color : COLOR;
-	float2 uv0 : TEXCOORD0;
-	float2 uv1 : TEXCOORD1;
-};
-
-VS_TERRAIN_OUTPUT VSTerrain(VS_TERRAIN_INPUT input)
-{
-	VS_TERRAIN_OUTPUT output;
-
-	output.position = mul(mul(mul(float4(input.position, 1.0f), gmtxGameObject), gmtxView), gmtxProjection);
-	output.color = input.color;
-	output.uv0 = input.uv0;
-	output.uv1 = input.uv1;
-
-	return(output);
-}
-
 //-------------------------------------------------------------------------------------------------
 // Terrain Tessellation
 //-------------------------------------------------------------------------------------------------
@@ -410,6 +445,7 @@ struct DS_TERRAIN_TESSELLATION_OUTPUT
     float4 color : COLOR;
     float2 uv0 : TEXCOORD0;
     float2 uv1 : TEXCOORD1;
+    float3 positionW : POSITION; // World Position for Shadow
 };
 
 [domain("quad")]
@@ -437,56 +473,7 @@ DS_TERRAIN_TESSELLATION_OUTPUT DSTerrainTessellation(HS_TERRAIN_TESSELLATION_CON
     // Displacement Mapping
     float h = gtxtTerrainTexture.SampleLevel(gssWrap, uv0, 0).r; // Assuming height is in Red channel
     
-    // Adjust height scale. Assuming height map stores 0-1, we need to scale it to world height.
-    // The original VSTerrain logic assumed the mesh y-positions were already set by CPU.
-    // Here we reconstruct the height. However, the input control points already have the base height from CPU mesh generation.
-    // If we want detailed displacement, we should use a high-res height map or detail map here.
-    // For now, let's assume the CPU mesh provides the coarse shape, and we add detail or just rely on the interpolated position.
-    // But since the original mesh IS the heightmap mesh, the 'vPos.y' is already the correct height from the CPU grid.
-    // Interpolating it gives the correct tessellated height.
-    // If we want to add extra detail from a displacement map:
-    // vPos.y += (h - vPos.y) * displacementScale; 
-    
-    // Since the original mesh is generated from heightmap, simple interpolation reconstructs the surface.
-    // But to get *extra* detail (true displacement mapping), we would need a higher res map than the vertex grid.
-    // If the texture and grid are 1:1, bilinear interpolation is sufficient to smooth it.
-    // But DSTerrainTessellation allows the mesh to be smoother than the linear interpolation of the original grid if we sample the texture again.
-    
-    // Re-sample height to get exact height at this new tessellated position
-    // Note: The CPU mesh generation might have scaled the height. We need to match that scale.
-    // We don't have the scale passed in here easily without a constant buffer.
-    // HOWEVER, `vPos.y` is the interpolated height.
-    // If we want the *texture* height (which might be more detailed/curved than the linear interpolation of 4 points), we should use `h`.
-    // But we need the Y-scale factor.
-    // Let's assume for now that simple interpolation of the existing control points is what is desired for smoothing, 
-    // or if we strictly want to match the heightmap:
-    
-    // For now, simple smoothing (Phong Tessellation or just interpolation) is a good start. 
-    // To match the heightmap exactly:
-    // vPos.y = h * gGameObjectInfo.m_vScale.y; // We'd need to pass scale in CB.
-    
-    // Let's stick to simple interpolation first. It smooths the terrain geometry.
-    // To make it better, let's actually re-sample the height if we can, or just trust the interpolation.
-    // Given we are doing LOD, simply interpolating the coarse mesh vertices is the standard "PN-Triangles" or similar approach,
-    // but for terrain, we usually want to sample the heightmap again.
-    
-    // Let's use the interpolated position, but if we had the scale, we could override Y.
-    // For this implementation, I will just use the interpolated position `vPos`.
-    // This effectively gives us geometric subdivision (smoother silhouette if the control points were curved, but here they are a grid).
-    // Actually, on a flat grid, linear interpolation just gives smaller flat quads.
-    // To get curves, we MUST sample the heightmap.
-    
-    // Since we don't have the scale in the shader easily (unless we add it to cbGameObjectInfo), 
-    // let's try to infer it or just assume the texture sampling is needed.
-    // Problem: The `h` is 0..1. The world `y` is 0..ScaleY.
-    // If we rely on linear interpolation of Control Points, we get a flat surface between grid points.
-    // WE NEED DISPLACEMENT to see extra detail.
-    
-    // WORKAROUND: In CHeightMapTerrain, the mesh has correct Y.
-    // We will assume the `gtxtTerrainTexture` holds the height data.
-    // Let's rely on the interpolated Y for now to avoid flattening the terrain if scale is unknown.
-    // If you want "True" displacement, we need to pass the height scale.
-    
+    output.positionW = vPos; // Save World Pos
     output.position = mul(mul(float4(vPos, 1.0f), gmtxView), gmtxProjection);
     output.uv0 = uv0;
     output.uv1 = uv1;
@@ -494,14 +481,16 @@ DS_TERRAIN_TESSELLATION_OUTPUT DSTerrainTessellation(HS_TERRAIN_TESSELLATION_CON
     return output;
 }
 
-float4 PSTerrain(VS_TERRAIN_OUTPUT input) : SV_TARGET
+float4 PSTerrain(DS_TERRAIN_TESSELLATION_OUTPUT input) : SV_TARGET
 {
 	float4 cBaseTexColor = gtxtTerrainTexture.Sample(gssWrap, input.uv0);
 	float4 cDetailTexColor = gtxtDetailTexture.Sample(gssWrap, input.uv1);
-	//	float fAlpha = gtxtTerrainTexture.Sample(gssWrap, input.uv0);
 
 	float4 cColor = cBaseTexColor * 0.5f + cDetailTexColor * 0.5f;
-	//	float4 cColor = saturate(lerp(cBaseTexColor, cDetailTexColor, fAlpha));
+    
+    // Apply Shadow
+    float shadow = CalcPcfShadow(float4(input.positionW, 1.0f));
+    cColor.rgb *= lerp(0.4f, 1.0f, shadow);
 
 	return(cColor);
 }
@@ -729,9 +718,9 @@ float4 PSMirror(VS_STANDARD_OUTPUT input) : SV_TARGET
     return cColor;
 }
 
-//=================================================================================================================================================
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 // MOTION BLUR COMPUTE SHADER
-//=================================================================================================================================================
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 RWTexture2D<float4> gOutput : register(u0);
 Texture2D<float4> gInput : register(t0); // Scene Texture
@@ -777,4 +766,34 @@ void CSMotionBlur(uint3 dispatchThreadID : SV_DispatchThreadID)
     color /= (float)nSamples;
     
     gOutput[pos] = color;
+}
+
+//-----------------------------------------------------------------------------
+// Shadow Map Shaders
+//-----------------------------------------------------------------------------
+struct VS_SHADOW_INPUT
+{
+	float3 position : POSITION;
+};
+
+struct VS_SHADOW_OUTPUT
+{
+	float4 position : SV_POSITION;
+};
+
+VS_SHADOW_OUTPUT VS_SHADOW(VS_SHADOW_INPUT input)
+{
+    VS_SHADOW_OUTPUT output;
+    
+    // Transform directly to clip space using World, View, Projection matrices
+    output.position = mul(float4(input.position, 1.0f), gmtxGameObject);
+    output.position = mul(output.position, gmtxView);
+    output.position = mul(output.position, gmtxProjection);
+    
+    return output;
+}
+
+void PS_NULL(VS_SHADOW_OUTPUT input)
+{
+    // Depth-only pass, no pixel output
 }

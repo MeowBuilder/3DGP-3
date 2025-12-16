@@ -605,7 +605,7 @@ void CGameFramework::ProcessInput()
 					else
 						m_pPlayer->Rotate(cyDelta, cxDelta, 0.0f);
 				}
-				if (dwDirection) m_pPlayer->Move(dwDirection, 1.55f, true);
+				if (dwDirection) m_pPlayer->Move(dwDirection, 3.0f, true);
 			}
 		}
 		m_pPlayer->Update(m_GameTimer.GetTimeElapsed());
@@ -665,6 +665,28 @@ void CGameFramework::FrameAdvance()
 	HRESULT hResult = m_pd3dCommandAllocator->Reset();
 	hResult = m_pd3dCommandList->Reset(m_pd3dCommandAllocator, NULL);
 
+    if (m_pScene && m_pScene->GetShadowMap())
+    {
+        // -------------------------------------------------------------------------
+        // 1. Shadow Pass
+        // -------------------------------------------------------------------------
+        D3D12_RESOURCE_BARRIER d3dResourceBarrier;
+        ::ZeroMemory(&d3dResourceBarrier, sizeof(D3D12_RESOURCE_BARRIER));
+        d3dResourceBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        d3dResourceBarrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+        d3dResourceBarrier.Transition.pResource = m_pScene->GetShadowMap();
+        d3dResourceBarrier.Transition.StateBefore = D3D12_RESOURCE_STATE_GENERIC_READ; 
+        d3dResourceBarrier.Transition.StateAfter = D3D12_RESOURCE_STATE_DEPTH_WRITE;
+        d3dResourceBarrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        m_pd3dCommandList->ResourceBarrier(1, &d3dResourceBarrier);
+
+        m_pScene->RenderShadowMap(m_pd3dCommandList, m_pCamera);
+
+        d3dResourceBarrier.Transition.StateBefore = D3D12_RESOURCE_STATE_DEPTH_WRITE;
+        d3dResourceBarrier.Transition.StateAfter = D3D12_RESOURCE_STATE_GENERIC_READ;
+        m_pd3dCommandList->ResourceBarrier(1, &d3dResourceBarrier);
+    }
+
     // [SAFETY CHECK] If scene texture is missing, skip post-process logic to avoid crash
     if (!m_pSceneTexture) 
     {
@@ -704,7 +726,7 @@ void CGameFramework::FrameAdvance()
     }
 
     //=============================================================================================
-    // 1. Render Scene to Off-screen Texture (m_pSceneTexture)
+    // 2. Main Render Pass (Render to Off-screen Texture)
     //=============================================================================================
 	D3D12_RESOURCE_BARRIER d3dResourceBarrier;
 	::ZeroMemory(&d3dResourceBarrier, sizeof(D3D12_RESOURCE_BARRIER));
@@ -724,14 +746,8 @@ void CGameFramework::FrameAdvance()
 
 	m_pd3dCommandList->OMSetRenderTargets(1, &m_d3dSceneTextureRtvCPUHandle, TRUE, &d3dDsvCPUDescriptorHandle);
 
-	if (m_GameState == GameState::InGame)
-	{
-		if (m_pScene) m_pScene->Render(m_pd3dCommandList, m_pCamera);
-	}
-	else
-	{
-		if (m_pScene) m_pScene->Render(m_pd3dCommandList, NULL);
-	}
+
+	if (m_pScene) m_pScene->Render(m_pd3dCommandList, m_pCamera);
 
     // Transition Scene Texture to SRV for Compute Shader (or Copy)
 	d3dResourceBarrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
@@ -739,7 +755,7 @@ void CGameFramework::FrameAdvance()
 	m_pd3dCommandList->ResourceBarrier(1, &d3dResourceBarrier);
 
     //=============================================================================================
-    // 2. Motion Blur Compute Shader
+    // 3. Motion Blur Compute Shader
     //=============================================================================================
     ID3D12Resource* pResultTexture = m_pSceneTexture; // Default if blur not applied
 
@@ -804,7 +820,7 @@ void CGameFramework::FrameAdvance()
     }
 
     //=============================================================================================
-    // 3. Copy Result to BackBuffer
+    // 4. Copy Result to BackBuffer
     //=============================================================================================
     
     // Transition BackBuffer to COPY_DEST
@@ -832,7 +848,7 @@ void CGameFramework::FrameAdvance()
 	m_pd3dCommandList->ResourceBarrier(1, &d3dResourceBarrier);
 
     //=============================================================================================
-    // 4. Render UI to Back Buffer
+    // 5. Render UI to Back Buffer
     //=============================================================================================
 	D3D12_CPU_DESCRIPTOR_HANDLE d3dRtvCPUDescriptorHandle = m_pd3dRtvDescriptorHeap->GetCPUDescriptorHandleForHeapStart();
 	d3dRtvCPUDescriptorHandle.ptr += (m_nSwapChainBufferIndex * gnRtvDescriptorIncrementSize);
@@ -842,14 +858,12 @@ void CGameFramework::FrameAdvance()
     if (m_GameState == GameState::InGame && m_pScene)
     {
         // Force update UI logic without rendering scene again
-        m_pScene->UpdateUIButtons(m_GameTimer.GetTimeElapsed()); // Actually this just updates main menu buttons?
-        // We need separate UI render call. 
-        // Currently CScene::Render handles everything.
-        // Let's assume UI was already drawn in Step 1 for now (blurred together).
-        // If we want sharp UI, we need to extract UI rendering from CScene::Render or call it here.
-        // CScene::Render does: UpdatePlayerSpeedUI() -> Render UI Meshes.
-        // We can call a specialized UI render function if we refactor.
-        // For simplicity, UI is blurred for now.
+        m_pScene->UpdateUIButtons(m_GameTimer.GetTimeElapsed()); 
+        // Note: For now, UI is drawn by m_pScene->Render() onto the Scene Texture which gets blurred.
+        // If you want sharp UI, you should call a dedicated UI render function here.
+        // For simplicity, we assume UI is already handled. If it's invisible, it's because
+        // we are not calling Render(UI) here.
+        // Let's assume UI is part of the 3D scene for now or rendered in the main pass.
     }
 
     // Transition BackBuffer to PRESENT

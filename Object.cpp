@@ -369,27 +369,18 @@ void CGameObject::AddRef()
 {
 	m_nReferences++; 
 
-	if (m_pSibling) m_pSibling->AddRef();
-	if (m_pChild) m_pChild->AddRef();
+	// if (m_pSibling) m_pSibling->AddRef();
+	// if (m_pChild) m_pChild->AddRef();
 }
 
 void CGameObject::Release() 
 {
-    // TCHAR buffer[256];
-    // _stprintf_s(buffer, L"CGameObject::Release() called on %p. m_nReferences: %d\n", this, m_nReferences);
-    // OutputDebugString(buffer);
-
-	if (m_pSibling) m_pSibling->Release();
-	if (m_pChild) m_pChild->Release();
-
     int nNewReferences = --m_nReferences;
-    // _stprintf_s(buffer, L"CGameObject::Release() on %p. New m_nReferences: %d\n", this, nNewReferences);
-    // OutputDebugString(buffer);
-
 	if (nNewReferences <= 0) 
     {
-        // _stprintf_s(buffer, L"CGameObject::Release() deleting %p\n", this);
-        // OutputDebugString(buffer);
+		if (m_pSibling) m_pSibling->Release();
+		if (m_pChild) m_pChild->Release();
+
         delete this; 
     }
 }
@@ -450,6 +441,27 @@ CGameObject *CGameObject::FindFrame(char *pstrFrameName)
 	if (m_pChild) if (pFrameObject = m_pChild->FindFrame(pstrFrameName)) return(pFrameObject);
 
 	return(NULL);
+}
+
+void CGameObject::RenderShadow(ID3D12GraphicsCommandList* pd3dCommandList)
+{
+	if (!m_bRender) return;
+
+	OnPrepareRender();
+
+	// Shadow shader uses b2 for GameObject info (World Matrix)
+	UpdateShaderVariable(pd3dCommandList, &m_xmf4x4World);
+
+	if (m_ppMeshes)
+	{
+		for (int i = 0; i < m_nMeshes; i++)
+		{
+			if (m_ppMeshes[i]) m_ppMeshes[i]->Render(pd3dCommandList, 0);
+		}
+	}
+
+	if (m_pSibling) m_pSibling->RenderShadow(pd3dCommandList);
+	if (m_pChild) m_pChild->RenderShadow(pd3dCommandList);
 }
 
 void CGameObject::Render(ID3D12GraphicsCommandList* pd3dCommandList, CCamera* pCamera)
