@@ -1,0 +1,76 @@
+### 3. 그림자 매핑 구현 분석
+
+그림자 매핑은 `CScene` 클래스에서 다음과 같이 구현됩니다.
+
+#### 3.1. 리소스 생성 및 초기화 (`CScene::BuildObjects`)
+
+1.  **광원 카메라 (`m_pLightCamera`)**:
+    *   `BuildObjects` 내에서 `new CCamera()`로 생성됩니다.
+    *   `m_pLightCamera->CreateShaderVariables`가 호출됩니다.
+    *   **투영 행렬 설정**: `XMMatrixOrthographicOffCenterLH`를 사용하여 직교 투영 행렬이 설정됩니다.
+        *   `shadowMapWidth` 및 `shadowMapHeight`는 8000.0f로 설정되어 넓은 영역을 커버합니다.
+        *   `shadowNearZ`는 1.0f, `shadowFarZ`는 5000.0f로 설정됩니다. 이는 그림자 캐스케이드(Shadow Cascades)가 아닌 단일 그림자 맵임을 시사합니다.
+2.  **그림자 맵 텍스처 (`m_pd3dShadowMap`)**:
+    *   `ID3D12Resource`로 생성됩니다.
+    *   **해상도**: `SHADOW_MAP_WIDTH` (4096) 및 `SHADOW_MAP_HEIGHT` (4096)로 설정되어 고해상도 그림자를 제공합니다.
+    *   **포맷**: `DXGI_FORMAT_R32_TYPELESS`로 생성되어, DSV(Depth Stencil View)로 사용될 때는 `DXGI_FORMAT_D32_FLOAT`, SRV(Shader Resource View)로 사용될 때는 `DXGI_FORMAT_R32_FLOAT`로 해석될 수 있습니다.
+    *   **플래그**: `D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL`로 설정되어 깊이 버퍼로 사용될 수 있음을 나타냅니다.
+    *   **초기 상태**: `D3D12_RESOURCE_STATE_GENERIC_READ`로 설정되며, 이는 셰이더에서 읽을 준비가 되었음을 의미합니다.
+    *   **클리어 값**: `d3dClearValue.Format = DXGI_FORMAT_D32_FLOAT`, `Depth = 1.0f`로 설정되어 깊이 버퍼를 최대 깊이로 클리어합니다.
+3.  **그림자 맵 DSV 힙 (`m_pd3dShadowDsvHeap`)**:
+    *   단일 디스크립터를 위한 `D3D12_DESCRIPTOR_HEAP_TYPE_DSV` 유형의 전용 디스크립터 힙이 생성됩니다.
+    *   `D3D12_DEPTH_STENCIL_VIEW_DESC`가 `DXGI_FORMAT_D32_FLOAT`로 설정되어, `m_pd3dShadowMap` 리소스에 대한 DSV가 생성되고 `m_d3dShadowDsvCpuHandle`에 저장됩니다.
+4.  **그림자 맵 SRV (`m_d3dShadowSrvGpuHandle`)**:
+    *   `m_pd3dShadowMap`에 대한 SRV가 생성됩니다.
+    *   `D3D12_SHADER_RESOURCE_VIEW_DESC`는 `DXGI_FORMAT_R32_FLOAT`로 설정되어, 셰이더에서 32비트 float 텍스처로 읽을 수 있도록 합니다.
+    *   `m_pDescriptorHeap`의 `m_d3dSrvGPUDescriptorNextHandle`을 사용하여 `CBV_SRV_UAV` 힙에 배치되며, `m_d3dShadowSrvGpuHandle`에 GPU 디스크립터 핸들이 저장됩니다.
+5.  **뷰포트 및 시저 사각형 (`m_d3dShadowViewport`, `m_d3dShadowScissorRect`)**:
+    *   그림자 맵의 크기(`SHADOW_MAP_WIDTH`, `SHADOW_MAP_HEIGHT`)에 맞춰 설정됩니다.
+6.  **그림자 정보 상수 버퍼 (`m_pd3dcbShadowInfo`)**:
+    *   `SHADOW_INFO` 구조체(`m_xmf4x4ShadowTransform`, `m_fShadowBias` 포함)를 저장하기 위한 업로드 힙 리소스(`D3D12_HEAP_TYPE_UPLOAD`)로 생성됩니다.
+    *   `m_pcbMappedShadowInfo`에 매핑되어 CPU에서 데이터를 업데이트할 수 있도록 합니다.
+7.  **그림자 셰이더 생성**: `CShadowShader`의 인스턴스 `pShadowShader`가 생성되고 `CreateShader`를 호출하여 그림자 맵 렌더링에 필요한 PSO를 생성합니다. 이 셰이더는 `m_ppShaders` 배열에 저장됩니다.
+
+#### 3.2. 그림자 맵 생성 (`CScene::RenderShadowMap`)
+
+이 함수는 광원 시점에서의 깊이 맵(그림자 맵)을 생성하는 역할을 합니다. `GameFramework.cpp`의 "Shadow Pass"에서 호출됩니다.
+
+1.  **뷰포트 및 시저 설정**: `m_d3dShadowViewport` 및 `m_d3dShadowScissorRect`를 커맨드 리스트에 설정합니다.
+2.  **깊이 스텐실 뷰 클리어**: `m_d3dShadowDsvCpuHandle`이 가리키는 그림자 맵을 깊이(1.0f) 및 스텐실(0)로 클리어합니다.
+3.  **렌더 타겟 설정**: `pd3dCommandList->OMSetRenderTargets(0, NULL, FALSE, &m_d3dShadowDsvCpuHandle);`
+    *   색상 렌더 타겟은 `0`으로 설정하고 `NULL`을 전달하여 색상 출력을 비활성화합니다. 이는 깊이-만(depth-only) 렌더링 패스임을 의미합니다.
+    *   깊이 스텐실 뷰로 `m_d3dShadowDsvCpuHandle`을 사용합니다.
+4.  **루트 시그니처 및 디스크립터 힙 설정**: `m_pd3dGraphicsRootSignature`와 `m_pDescriptorHeap->m_pd3dCbvSrvDescriptorHeap`가 설정됩니다. 이는 그림자 맵 렌더링에서도 메인 씬의 루트 시그니처를 재사용함을 의미합니다.
+5.  **광원 카메라 업데이트**:
+    *   활성화된 Directional Light(`m_pLights[2]`)가 있다고 가정하고 광원 카메라의 뷰 행렬을 업데이트합니다.
+    *   광원의 위치는 플레이어 위치에서 광원 방향(`m_pLights[2].m_xmf3Direction`)으로 500.0f 떨어진 곳으로 설정됩니다.
+    *   `XMMatrixLookAtLH`를 사용하여 광원 시점의 뷰 행렬을 계산하고 `m_pLightCamera->SetViewMatrix()`로 설정합니다.
+    *   `m_pLightCamera->UpdateShaderVariables()`를 호출하여 광원 카메라의 뷰/투영 행렬을 상수 버퍼에 업데이트합니다.
+6.  **객체 렌더링**:
+    *   `CShadowShader` 인스턴스(`pShadowShader`)를 가져옵니다.
+    *   `pShadowShader->GetPipelineState(0)`을 사용하여 그림자 맵 렌더링을 위한 PSO를 설정합니다.
+    *   플레이어, 빌딩 및 기타 `CObjectsShader`에 의해 관리되는 객체(`m_ppGameObjects`)는 각 `RenderShadow(pd3dCommandList)` 메서드를 통해 그림자 맵에 렌더링됩니다. 이 메서드들은 해당 객체의 월드 행렬을 광원 카메라의 뷰/투영 행렬과 함께 `VS_SHADOW` 셰이더에 전달하여 깊이 값을 그림자 맵에 기록합니다.
+    *   주석에 따르면 지형 그림자 캐스팅은 현재 비활성화되어 있습니다.
+
+#### 3.3. 그림자 정보 업데이트 및 메인 렌더링 (`CScene::UpdateShaderVariables`, `CScene::Render`)
+
+1.  **그림자 정보 상수 버퍼 업데이트 (`CScene::UpdateShaderVariables`)**:
+    *   활성화된 Directional Light가 있는 경우 `m_pLightCamera`의 뷰 및 투영 행렬을 사용하여 `lightVP = lightView * lightProj`를 계산합니다.
+    *   **텍스처 공간 변환**: NDC([-1,1])에서 텍스처 공간([0,1])으로 변환하기 위한 바이어스 행렬(`texScaleBiasMatrix`)을 정의합니다. DirectX 텍스처 좌표계가 상단에서 아래로 진행되므로 Y축 반전이 포함됩니다.
+    *   `m_pcbMappedShadowInfo->m_xmf4x4ShadowTransform`은 `lightVP * texScaleBiasMatrix`의 전치 행렬로 업데이트됩니다. 이 행렬은 메인 셰이더에서 월드 좌표를 그림자 맵의 텍스처 좌표로 변환하는 데 사용됩니다.
+    *   `m_pcbMappedShadowInfo->m_fShadowBias`는 0.005f로 설정됩니다.
+    *   `pd3dCommandList->SetGraphicsRootConstantBufferView(18, ...)`를 사용하여 그림자 정보 상수 버퍼(`cbShadow` - b9)를 루트 매개변수 18에 바인딩합니다.
+2.  **그림자 맵 SRV 바인딩 (`CScene::Render`)**:
+    *   메인 렌더링 패스에서 `pd3dCommandList->SetGraphicsRootDescriptorTable(17, m_d3dShadowSrvGpuHandle);`를 호출하여 그림자 맵 SRV(`gShadowMap` - t31)를 루트 매개변수 17에 바인딩합니다.
+    *   또한, `CScene::CreateGraphicsRootSignature`에서 정의된 `pd3dSamplerDescs[2]`(`gssShadow` - s2)에 비교 샘플러가 바인딩됩니다.
+3.  **메인 셰이더에서의 그림자 적용 (`Shaders.hlsl` - `PSStandard`, `CalcPcfShadow`)**:
+    *   `Shaders.hlsl`의 `PSStandard` 픽셀 셰이더에서 `CalcPcfShadow` 함수를 호출하여 그림자 인자(`shadowFactor`)를 계산합니다.
+    *   `CalcPcfShadow` 함수는 `gmtxShadowTransform`을 사용하여 픽셀의 월드 좌표를 그림자 맵 공간으로 변환합니다.
+    *   변환된 그림자 좌표의 범위 유효성 검사(`0.0f` ~ `1.0f`).
+    *   **PCF (Percentage-Closer Filtering)**: 3x3 필터링 영역(`x=-1..1, y=-1..1`)에서 `gShadowMap.SampleCmpLevelZero`를 사용하여 그림자 맵을 비교 샘플링합니다. 이는 그림자 가장자리의 계단 현상을 줄여 부드러운 그림자를 만듭니다.
+    *   `shadowFactor`는 `0.0f` (완전한 그림자)에서 `1.0f` (그림자 없음) 사이의 값으로 반환됩니다.
+    *   `PSStandard` 셰이더는 `cFinalColor.rgb *= lerp(0.4f, 1.0f, shadowFactor);`를 통해 `shadowFactor`를 적용하여 그림자 영역의 색상을 어둡게 합니다.
+
+### 그림자 매핑 요약
+
+이 프로젝트의 그림자 매핑은 4096x4096 해상도의 깊이 맵을 사용하는 단일 광원 기반의 기술입니다. 광원의 시점에서 깊이 맵을 생성하는 별도의 렌더링 패스(깊이-만 렌더링)를 사용하며, 깊이 바이어스(Depth Bias) 및 기울기 스케일 깊이 바이어스(Slope-Scaled Depth Bias)를 적용하여 그림자 아크네(Shadow Acne)를 방지합니다. 메인 렌더링 패스에서는 이 깊이 맵을 SRV로 바인딩하고, 셰이더에서 PCF(Percentage-Closer Filtering)를 통해 그림자를 샘플링하여 부드러운 그림자 가장자리를 구현합니다. `m_pLightCamera`를 동적으로 업데이트하여 플레이어를 따라다니는 광원 카메라를 구현함으로써 그림자 품질을 최적화하고 있습니다.

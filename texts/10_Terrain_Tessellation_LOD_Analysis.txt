@@ -1,0 +1,90 @@
+### 1. 지형 테셀레이션을 적용한 LOD 기능 구현 분석
+
+이 프로젝트는 DirectX 12의 지형 테셀레이션 기능을 활용하여 LOD(Level of Detail)를 구현하고 있습니다. 구현은 주로 `CTerrainShader` 클래스와 `Shaders.hlsl` 파일 내의 셰이더 함수들을 통해 이루어집니다.
+
+#### 1.1. C++ 측 (`Shader.h`, `Shader.cpp`, `Scene.h`, `Scene.cpp`)
+
+#### 1.1.1. 지형 셰이더 클래스 (`CTerrainShader`, `CShader`에서 파생)
+*   **선언:** `Shader.h`에 선언되어 있고 `Shader.cpp`에 구현되어 있습니다.
+*   **`CTerrainShader::CreateInputLayout()`**:
+    *   `POSITION` (float3), `COLOR` (float4), `TEXCOORD` (uv0 - float2), `TEXCOORD` (uv1 - float2)를 입력 요소로 사용합니다. 이는 지형 메시가 위치, 색상, 두 세트의 텍스처 좌표를 포함함을 나타냅니다.
+*   **셰이더 바이트코드 생성 메서드**:
+    *   `CTerrainShader::CreateVertexShader()`: `Shaders.hlsl`에서 `VSTerrainTessellation` (vs_5_1 프로파일)을 컴파일합니다.
+    *   `CTerrainShader::CreateHullShader()`: `Shaders.hlsl`에서 `HSTerrainTessellation` (hs_5_1 프로파일)을 컴파일합니다.
+    *   `CTerrainShader::CreateDomainShader()`: `Shaders.hlsl`에서 `DSTerrainTessellation` (ds_5_1 프로파일)을 컴파일합니다.
+    *   `CTerrainShader::CreatePixelShader()`: `Shaders.hlsl`에서 `PSTerrain` (ps_5_1 프로파일)을 컴파일합니다.
+*   **`CTerrainShader::CreateShader(ID3D12Device* pd3dDevice, ...)`**:
+    *   `D3D12_GRAPHICS_PIPELINE_STATE_DESC`를 설정하여 테셀레이션 파이프라인을 구성합니다.
+    *   **루트 시그니처**: `pd3dGraphicsRootSignature`를 사용합니다.
+    *   **셰이더 단계**: `VS`, `HS`, `DS`, `PS` 모두 할당됩니다.
+    *   **블렌드 및 깊이/스텐실 상태**: `CShader`의 기본 구현을 사용합니다.
+    *   **입력 레이아웃**: `CreateInputLayout()`에서 정의한 것을 사용합니다.
+    *   **프리미티브 토폴로지 타입**: `D3D12_PRIMITIVE_TOPOLOGY_TYPE_PATCH`로 설정됩니다. 이는 Hull Shader가 처리할 컨트롤 포인트 패치를 예상한다는 의미입니다. (`CTerrainShader`는 4개의 컨트롤 포인트를 가진 패치로 가정하는 것으로 보입니다. 이는 `HSTerrainTessellation`의 `InputPatch<..., 4>`로 확인됩니다.)
+    *   **렌더 타겟 포맷**: `RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM`, `DSVFormat = DXGI_FORMAT_D24_UNORM_S8_UINT`.
+    *   **세 가지 PSO**:
+        *   PSO[0]: 일반 지형 렌더링 (`CreateRasterizerState()`)
+        *   PSO[1]: 반사 지형 렌더링 (`CreateReflectionStencilState()`, `FrontCounterClockwise = TRUE`)
+        *   PSO[2]: 와이어프레임 지형 렌더링 (`D3D12_FILL_MODE_WIREFRAME`, `CreateDepthStencilState()`)
+
+#### 1.1.2. 씬 클래스 (`CScene`)에서의 통합
+*   **`m_pd3dcbTerrainTessellation`**: `TERRAIN_TESSELLATION_INFO` 구조체(`m_xmf4x4TessellationFactor`, `m_fTerrainHeightScale` 포함)를 GPU에 전달하기 위한 상수 버퍼(`ID3D12Resource`)입니다.
+*   **`m_pcbMappedTerrainTessellation`**: `m_pd3dcbTerrainTessellation`에 매핑된 CPU 포인터로, CPU에서 상수 버퍼 데이터를 업데이트하는 데 사용됩니다.
+*   **`CScene::BuildObjects()`**:
+    *   `m_pTerrain = new CHeightMapTerrain(...)`을 통해 `CHeightMapTerrain` 객체를 생성합니다.
+    *   `m_pcbMappedTerrainTessellation->m_xmf4TessellationFactor`에 {4.0f, 32.0f, 20.0f, 200.0f}와 같은 초기 테셀레이션 인자가 설정됩니다. 이 값들은 각각 MinTess, MaxTess, MinDist, MaxDist를 나타냅니다 (HLSL의 `gvTessellationFactor`와 매핑).
+    *   `m_pcbMappedTerrainTessellation->m_fTerrainHeightScale`은 지형의 Y 스케일 값으로 설정됩니다.
+*   **`CScene::CreateGraphicsRootSignature()`**:
+    *   `pd3dRootParameters[16]`에 `D3D12_ROOT_PARAMETER_TYPE_CBV`를 추가하여 `cbTerrainTessellation`을 셰이더 레지스터 `b8`에 바인딩합니다. `ShaderVisibility`는 `D3D12_SHADER_VISIBILITY_ALL`로 설정됩니다.
+*   **`CScene::Render()`**:
+    *   `pd3dCommandList->SetGraphicsRootConstantBufferView(16, m_pd3dcbTerrainTessellation->GetGPUVirtualAddress());`를 호출하여 지형 테셀레이션 상수 버퍼를 바인딩합니다.
+    *   `m_pTerrain->Render(pd3dCommandList, pCamera)`를 호출하여 지형을 렌더링합니다. `m_bWireframe` 플래그에 따라 일반 또는 와이어프레임 PSO를 선택합니다.
+
+#### 1.2. HLSL 측 (`Shaders.hlsl`)
+
+#### 1.2.1. 지형 테셀레이션 관련 상수 버퍼
+*   **`cbuffer cbTerrainTessellation : register(b8)`**:
+    *   `float4 gvTessellationFactor;` (x: MinTess, y: MaxTess, z: MinDist, w: MaxDist) - C++에서 설정된 테셀레이션 최소/최대 인자 및 거리입니다.
+    *   `float gTerrainHeightScale;` - 지형의 높이 스케일입니다.
+*   **`cbuffer cbCameraInfo : register(b1)`**: `gvCameraPosition` (카메라 월드 위치)를 포함하며, 이는 LOD 계산에 사용됩니다.
+
+#### 1.2.2. 버텍스 셰이더 (`VSTerrainTessellation`)
+*   `VS_TERRAIN_TESSELLATION_INPUT`을 받아 `VS_TERRAIN_TESSELLATION_OUTPUT`을 반환합니다.
+*   입력 `position`을 `gmtxGameObject`를 사용하여 월드 공간으로 변환하고, 이를 다른 입력 데이터와 함께 Hull Shader로 전달합니다. 아직 투영 변환을 수행하지 않습니다.
+
+#### 1.2.3. Hull Shader (패치 상수 함수 - `HSTerrainTessellationConstant`)
+*   `InputPatch<VS_TERRAIN_TESSELLATION_OUTPUT, 4> inputPatch`를 받아 `HS_TERRAIN_TESSELLATION_CONSTANT_DATA_OUTPUT`을 반환합니다.
+*   **LOD 계산 (`CalculateTessellationFactor`)**:
+    *   `float d = distance(p, gvCameraPosition);`를 사용하여 패치 내의 위치(`p`)와 카메라 위치(`gvCameraPosition`) 사이의 거리를 계산합니다.
+    *   `float s = saturate((d - MIN_TESSELLATION_DISTANCE) / (MAX_TESSELLATION_DISTANCE - MIN_TESSELLATION_DISTANCE));`를 통해 거리를 [0,1] 범위로 정규화합니다.
+    *   `return lerp(MAX_TESSELLATION_FACTOR, MIN_TESSELLATION_FACTOR, s);`를 통해 카메라 거리에 따라 테셀레이션 인자(`MAX_TESSELLATION_FACTOR`~`MIN_TESSELLATION_FACTOR`, HLSL 상수)를 선형 보간합니다.
+    *   `cbTerrainTessellation`의 `gvTessellationFactor`를 사용하여 동적 LOD를 조절할 수도 있습니다. 현재 코드에는 상수 값이 사용되고 있지만, `gvTessellationFactor`를 통해 제어할 수 있는 구조입니다.
+*   **테셀레이션 인자 결정**: 패치의 각 엣지(`EdgeTess[4]`)와 내부(`InsideTess[2]`)에 대해 `CalculateTessellationFactor`를 호출하여 테셀레이션 인자를 계산합니다.
+
+#### 1.2.4. Hull Shader (메인 함수 - `HSTerrainTessellation`)
+*   `[domain("quad")]`, `[partitioning("integer")]`, `[outputtopology("triangle_cw")]`, `[outputcontrolpoints(4)]`, `[patchconstantfunc("HSTerrainTessellationConstant")]`, `[maxtessfactor(64.0f)]`와 같은 속성들을 사용합니다.
+*   이는 사각형 도메인에서 정수 분할 방식의 테셀레이션을 수행하며, 출력은 시계 방향 삼각형으로, 4개의 컨트롤 포인트를 가지는 패치를 처리함을 나타냅니다.
+*   컨트롤 포인트의 위치, 색상, UV를 변경 없이 Domain Shader로 전달합니다.
+
+#### 1.2.5. Domain Shader (`DSTerrainTessellation`)
+*   `[domain("quad")]` 속성을 가집니다.
+*   `HS_TERRAIN_TESSELLATION_CONSTANT_DATA_OUTPUT input` (패치 상수 데이터)과 `float2 uv : SV_DomainLocation` (테셀레이션된 정점의 UV 좌표)를 받아 `DS_TERRAIN_TESSELLATION_OUTPUT`을 생성합니다.
+*   **보간**: `uv` 좌표를 사용하여 4개의 컨트롤 포인트에서 위치, 색상, 텍스처 좌표를 이선형(bilinear) 보간합니다.
+*   **변위 매핑**: `gtxtTerrainTexture.SampleLevel(gssWrap, uv0, 0).r`을 통해 `gtxtTerrainTexture`에서 높이 값을 샘플링합니다. 샘플링된 높이 값은 `gTerrainHeightScale`과 결합되어 정점의 Y(높이) 위치를 변위시킬 수 있습니다 (현재 HLSL 코드에는 직접적인 변위 적용 로직은 없으나, `gtxtTerrainTexture`에서 높이를 샘플링하는 부분은 변위 매핑에 사용될 수 있는 데이터를 가져오는 역할을 합니다).
+*   **최종 변환**: 보간된 월드 공간 위치(`vPos`)를 `gmtxView` 및 `gmtxProjection`을 사용하여 클립 공간으로 변환하여 `SV_POSITION`에 할당합니다.
+*   월드 위치(`positionW`)를 출력하여 그림자 계산 등 후속 단계에 사용합니다.
+
+#### 1.2.6. 픽셀 셰이더 (`PSTerrain`)
+*   `DSTerrainTessellation`의 출력을 받아 지형 텍스처(`gtxtTerrainTexture`, `gtxtDetailTexture`)를 샘플링하고 혼합합니다.
+*   `CalcPcfShadow` 함수를 호출하여 그림자 매핑을 적용합니다.
+
+### 지형 테셀레이션 및 LOD 요약
+
+이 프로젝트의 지형 테셀레이션은 카메라와의 거리에 기반한 동적 LOD 시스템을 구현합니다.
+*   **셰이더 파이프라인**: 버텍스 셰이더 -> Hull 셰이더 -> Domain 셰이더 -> 픽셀 셰이더로 구성됩니다.
+*   **LOD 계산**: Hull 셰이더의 패치 상수 함수에서 카메라와 패치 간의 거리를 기준으로 테셀레이션 인자를 동적으로 계산합니다. 카메라에 가까울수록 높은 테셀레이션 인자를, 멀어질수록 낮은 인자를 적용하여 성능과 시각적 품질의 균형을 맞춥니다.
+*   **변위 매핑**: Domain 셰이더는 텍스처를 이용한 변위 매핑을 지원하여 지형의 실제 기하학적 디테일을 추가할 수 있는 구조를 갖추고 있습니다. (`gtxtTerrainTexture`에서 높이 정보를 샘플링하는 부분이 확인됩니다.)
+*   **렌더링 옵션**: 일반 렌더링 외에 와이어프레임 모드를 지원하여 테셀레이션 수준을 시각적으로 확인 할 수 있습니다.
+*   **루트 시그니처**: `cbTerrainTessellation` (b8) 상수 버퍼를 포함하여 C++ 측에서 테셀레이션 관련 파라미터(`MinTess`, `MaxTess`, `MinDist`, `MaxDist`, `HeightScale`)를 동적으로 제어할 수 있도록 합니다.
+*   **그림자 통합**: 픽셀 셰이더에서 그림자 맵 샘플링을 통해 그림자 효과를 지형에 적용합니다.
+
+이로써 요청하신 3가지 구현 관점의 상세 분석이 완료되었습니다.

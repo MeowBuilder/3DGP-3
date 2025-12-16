@@ -1,0 +1,74 @@
+## 2. 계산 셰이더를 활용한 모션 블러 구현 분석
+
+이 프로젝트는 DirectX 12 계산 셰이더를 사용하여 모션 블러를 성공적으로 구현했습니다. 구현 세부 사항은 다음과 같습니다.
+
+### 2.1. C++ 측 (`GameFramework.cpp`, `Shader.h`, `Shader.cpp`)
+
+#### 2.1.1. 리소스 관리 (`CGameFramework`)
+*   **`m_pSceneTexture`**: 오프스크린 렌더 타겟(`D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET`)으로 사용되는 `ID3D12Resource`입니다. 주 장면 렌더링 패스는 이 텍스처에 렌더링합니다. 렌더링 후, 계산 셰이더의 입력 SRV로 사용하기 위해 `D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE`로 전환됩니다.
+*   **`m_pBlurTexture`**: `D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS` 플래그로 생성된 `ID3D12Resource`입니다. 이는 모션 블러 계산 셰이더의 출력 UAV 역할을 합니다. 초기에는 `D3D12_RESOURCE_STATE_COPY_SOURCE` 상태이며, 계산 셰이더 디스패치 전에 `D3D12_RESOURCE_STATE_UNORDERED_ACCESS`로 전환됩니다. 계산 패스 후에는 백 버퍼로 복사하기 위해 `D3D12_RESOURCE_STATE_COPY_SOURCE`로 다시 전환됩니다.
+*   **`m_pd3dCbvSrvUavDescriptorHeap`**: `D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV` 유형의 셰이더 가시 (`D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE`) 디스크립터 힙이 사용됩니다.
+    *   `m_pSceneTexture`에 대한 SRV는 이 힙의 시작 부분(인덱스 0)에 생성됩니다.
+    *   `m_pBlurTexture`에 대한 UAV는 이 힙의 인덱스 1에 생성됩니다.
+    *   직접 바인딩을 위해 GPU 디스크립터 핸들(`m_d3dSceneTextureSrvGPUHandle`, `m_d3dBlurTextureUavGPUHandle`)이 저장됩니다.
+
+#### 2.1.2. 모션 블러 셰이더 클래스 (`CMotionBlurShader`, `CShader`에서 파생)
+*   **선언:** `Shader.h`에 선언되어 있고 `Shader.cpp`에 구현되어 있습니다.
+*   **`m_pd3dComputeRootSignature`**: `CMotionBlurShader::CreateComputeRootSignature`에 의해 생성된 계산 셰이더를 위한 전용 `ID3D12RootSignature`입니다.
+*   **`CMotionBlurShader::CreateComputeRootSignature(ID3D12Device* pd3dDevice)`**:
+    *   세 개의 루트 매개변수를 정의합니다.
+        *   **루트 매개변수 0 (디스크립터 테이블 - UAV):** 출력 블러 텍스처(HLSL의 `u0`에 매핑)를 위한 단일 `D3D12_DESCRIPTOR_RANGE_TYPE_UAV` 디스크립터를 가리킵니다.
+        *   **루트 매개변수 1 (디스크립터 테이블 - SRV):** 입력 장면 텍스처(HLSL의 `t0`에 매핑)를 위한 단일 `D3D12_DESCRIPTOR_RANGE_TYPE_SRV` 디스크립터를 가리킵니다.
+        *   **루트 매개변수 2 (루트 상수 - CBV):** `D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS` 유형으로, 4개의 32비트 값(너비, 높이, 블러 강도, 방향)을 포함하며 셰이더 레지스터 `b4`에 매핑됩니다.
+    *   모든 루트 매개변수에 대해 `D3D12_SHADER_VISIBILITY_ALL`이 설정됩니다.
+    *   이 루트 시그니처 내에는 정적 샘플러가 정의되어 있지 않습니다.
+*   **`CMotionBlurShader::CreateComputeShader()`**:
+    *   `Shaders.hlsl` 파일에서 `CSMotionBlur` 진입점과 `cs_5_1` 셰이더 프로파일을 사용하여 계산 셰이더를 컴파일합니다.
+*   **`CMotionBlurShader::CreateShader(ID3D12Device* pd3dDevice, ...)`**:
+    *   `D3D12_COMPUTE_PIPELINE_STATE_DESC`를 생성합니다.
+    *   루트 시그니처로 `m_pd3dComputeRootSignature`를 설정합니다.
+    *   컴파일된 계산 셰이더 바이트코드를 `CS`에 할당합니다.
+    *   계산 셰이더를 위한 `ID3D12PipelineState` 객체를 생성합니다.
+*   **`CMotionBlurShader::Dispatch(ID3D12GraphicsCommandList* pd3dCommandList, int nWidth, int nHeight, int nDepth)`**:
+    *   이전에 생성된 계산 PSO를 설정합니다.
+    *   `pd3dCommandList->Dispatch(nWidth, nHeight, nDepth)`를 호출하여 계산 셰이더를 실행합니다.
+
+#### 2.1.3. 렌더링 루프 통합 (`CGameFramework::FrameAdvance()`)
+*   메인 장면이 `m_pSceneTexture`에 렌더링된 후:
+    *   `m_pBlurTexture`(UAV)와 `m_pSceneTexture`(SRV)에 리소스 배리어가 적용됩니다.
+    *   `CBV_SRV_UAV` 디스크립터 힙이 커맨드 리스트에 설정됩니다.
+    *   `SetComputeRootSignature`를 사용하여 계산 루트 시그니처(`m_pMotionBlurShader->m_pd3dComputeRootSignature`)가 설정됩니다.
+    *   `m_pBlurTexture`를 위한 UAV 디스크립터는 루트 매개변수 0에 바인딩됩니다.
+    *   `m_pSceneTexture`를 위한 SRV 디스크립터는 루트 매개변수 1에 바인딩됩니다.
+    *   플레이어 속도가 계산되어 `g_fBlurStrength`로 화면 크기와 함께 루트 매개변수 2(루트 상수)에 전달됩니다.
+    *   계산된 스레드 그룹 수(`nGroupsX = (width + 31) / 32`, `nGroupsY = (height + 31) / 32`, `nDepth = 1`)로 `m_pMotionBlurShader->Dispatch()`가 호출됩니다.
+    *   디스패치 후 `m_pBlurTexture`는 `COPY_SOURCE`로 전환되어 백 버퍼로 복사됩니다.
+
+### 2.2. HLSL 측 (`Shaders.hlsl`)
+
+#### 2.2.1. 계산 셰이더 커널 (`CSMotionBlur`)
+*   **입력/출력:**
+    *   `RWTexture2D<float4> gOutput : register(u0);` (출력 블러 텍스처)
+    *   `Texture2D<float4> gInput : register(t0);` (입력 장면 텍스처)
+    *   `cbuffer cbMotionBlur : register(b4)`: `g_nWidth`, `g_nHeight`, `g_fBlurStrength`, `g_nDirection`을 포함합니다.
+*   **스레드 그룹 구성:** `[numthreads(32, 32, 1)]`은 각 스레드 그룹이 32x32x1 스레드로 구성됨을 나타냅니다.
+*   **알고리즘:**
+    1.  **경계 확인:** 각 스레드는 `SV_DispatchThreadID`가 화면 크기(`g_nWidth`, `g_nHeight`) 내에 있는지 확인하여 범위를 벗어난 픽셀 처리를 방지합니다.
+    2.  **방사형 블러 계산:**
+        *   `center`: 화면의 중심을 계산합니다.
+        *   `pos`: 현재 픽셀의 좌표입니다.
+        *   `dir`: 화면 중심에서 현재 픽셀까지의 벡터를 계산합니다.
+        *   `dist`: 화면 중심에서 현재 픽셀까지의 거리입니다.
+        *   `dir = normalize(dir);`: 방향 벡터를 정규화합니다.
+    3.  **블러 강도 스케일링:** `float strength = g_fBlurStrength * (dist / (float)g_nWidth);`
+        *   C++ 측에서 전달된 기본 블러 강도(`g_fBlurStrength`, 플레이어 속도 인자)는 픽셀이 화면 중심에서 떨어진 거리(정규화된 `g_nWidth`로)에 비례하여 스케일링됩니다. 이는 중심에서 멀리 떨어진 픽셀이 더 많이 블러 처리되는 방사형 모션 블러 효과를 생성합니다.
+    4.  **누적 버퍼 샘플링:**
+        *   계산된 `dir` 벡터를 따라 `nSamples`(10으로 고정)만큼 샘플링을 수행합니다.
+        *   각 샘플 위치는 `center + dir * dist * scale`로 계산되며, 여기서 `scale`은 거리를 점진적으로 줄여 블러 방향을 따라 중심에 더 가까운 픽셀을 샘플링합니다.
+        *   샘플 위치는 화면 경계 내로 클램프됩니다.
+        *   샘플링된 색상이 누적됩니다.
+    5.  **평균 및 출력:** 누적된 색상을 `nSamples`로 나누어 평균을 구하고, 결과는 현재 픽셀 위치의 `gOutput` 텍스처에 기록됩니다.
+
+### 모션 블러 요약
+
+모션 블러 구현은 화면 공간 방사형 블러 효과를 사용합니다. 장면을 오프스크린 텍스처에 렌더링한 다음, 계산 셰이더를 사용하여 이 텍스처를 처리합니다. 계산 셰이더는 방사형 방향을 따라 여러 샘플을 취하며, 블러 강도는 플레이어의 속도와 픽셀이 화면 중심에서 떨어진 거리에 따라 조절됩니다. 결과는 두 번째 오프스크린 텍스처에 기록된 다음 화면에 표시됩니다. 이 접근 방식은 복잡한 객체별 속도 계산 없이도 모션 블러를 효과적으로 시뮬레이션하여 시각적으로 매력적인 후처리 효과를 제공합니다.
